@@ -687,3 +687,11 @@
 - Checkpoint G6 emitido (loop/checkpoints/G6-report.md, COMPLETO 7/7), loop
   PARADO aguardando aprovação do dono (G6.approved = GATILHO da FG do Vendaval).
   7 INB abertos no §3. O ÉPICO DE GOVERNANÇA (G1-G6) FECHA na aprovação.
+
+## 2026-09-10 — retomada da instalação local
+
+Estado desta etapa, evidências e bloqueios: [Instalação local](./../docs/local-setup-status.md). Preservados os registros históricos acima. Sem rebranding, tradução, migrations históricas ou push.
+
+## 2026-09-13 - NEXORA CRM
+
+Rebranding e estado atual: [PROJECT-STATUS.md](../docs/PROJECT-STATUS.md).

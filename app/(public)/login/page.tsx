@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 import { LoginForm } from "@/components/auth/LoginForm";
-import { branding } from "@/lib/branding";
+import { APP_DESCRIPTION, branding } from "@/lib/branding";
 import { createClient } from "@/lib/supabase/server";
 import { normalizarIdioma } from "@/lib/i18n/idiomas";
 import { traduzir } from "@/lib/i18n/dicionario";
@@ -32,6 +32,7 @@ export default async function LoginPage({
       <div className="space-y-1.5 text-center">
         <h1 className="text-2xl font-semibold tracking-tight">{t("Entrar")}</h1>
         <p className="text-sm text-muted-foreground">{branding().name}</p>
+        <p className="text-xs text-muted-foreground">{APP_DESCRIPTION}</p>
       </div>
       {reset === "success" && (
         <div

@@ -16,7 +16,9 @@
  * runtime em vez de lida do bundle.
  */
 
-export const DEFAULT_APP_NAME = "DeskcommCRM";
+export const DEFAULT_APP_NAME = "NEXORA";
+export const APP_FULL_NAME = "NEXORA CRM";
+export const APP_DESCRIPTION = "AI-Powered CRM";
 
 export type Branding = {
   /** Nome exibido na interface e nos títulos de página. */
@@ -39,7 +41,10 @@ export function resolveBranding(
   name: string | undefined | null,
   logoUrl: string | undefined | null,
 ): Branding {
-  const resolvedName = (name ?? "").trim() || DEFAULT_APP_NAME;
+  const suppliedName = (name ?? "").trim();
+  // Alias comercial do fork, sem alterar configurações persistidas ou identificadores.
+  const resolvedName = !suppliedName || /^deskcomm(?:\s*crm)?$/i.test(suppliedName)
+    ? DEFAULT_APP_NAME : suppliedName;
   const resolvedLogo = (logoUrl ?? "").trim();
   return {
     name: resolvedName,

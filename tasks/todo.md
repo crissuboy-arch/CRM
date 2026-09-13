@@ -81,3 +81,11 @@ Ordem definida pelo Rafael: **PRD → Regras de Negócio → Specs → Epics →
 - [ ] Quebrar stories em tasks técnicas
 - [ ] Sequenciar com dependências explícitas
 - [ ] Cronograma e marcos
+
+## 2026-09-10 — retomada da instalação local
+
+Estado desta etapa, evidências e bloqueios: [Instalação local](./../docs/local-setup-status.md). Preservados os registros históricos acima. Sem rebranding, tradução, migrations históricas ou push.
+
+## 2026-09-13 - NEXORA CRM
+
+Rebranding e estado atual: [PROJECT-STATUS.md](../docs/PROJECT-STATUS.md).

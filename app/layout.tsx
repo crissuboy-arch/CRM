@@ -1,3 +1,4 @@
+import { APP_DESCRIPTION } from "@/lib/branding";
 import type { Metadata, Viewport } from "next";
 import { Atkinson_Hyperlegible, IBM_Plex_Mono } from "next/font/google";
 import { headers } from "next/headers";
@@ -82,11 +83,10 @@ export async function generateMetadata(): Promise<Metadata> {
   const { name } = marca;
   return {
     title: {
-      default: `${name} — atendimento e vendas por WhatsApp com agentes de IA`,
+      default: `${name} — ${APP_DESCRIPTION}`,
       template: `%s · ${name}`,
     },
-    description:
-      "Centralize o atendimento por WhatsApp num funil só. Agentes de IA resolvem o que dá pra resolver e passam para o time humano o que importa — com tudo registrado. Multi-tenant, LGPD-nativo, feito para operações brasileiras.",
+    description: APP_DESCRIPTION,
     applicationName: name,
     authors: [{ name }],
     keywords: [

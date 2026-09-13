@@ -11,7 +11,10 @@ export function Providers({ children }: { children: ReactNode }) {
     <OrganizationTransitionProvider>
     <QueryClientProvider client={queryClient}>
       {children}
-      {process.env.NODE_ENV === 'development' && <ReactQueryDevtools initialIsOpen={false} />}
+      {process.env.NODE_ENV === 'development' &&
+        process.env.NEXT_PUBLIC_REACT_QUERY_DEVTOOLS === 'true' && (
+          <ReactQueryDevtools initialIsOpen={false} />
+        )}
     </QueryClientProvider>
     </OrganizationTransitionProvider>
   );

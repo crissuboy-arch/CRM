@@ -1,3 +1,11 @@
+# NEXORA CRM
+
+AI-Powered CRM. Identidade desta instalacao: [BRANDING.md](docs/BRANDING.md). Estado local: [PROJECT-STATUS.md](docs/PROJECT-STATUS.md).
+
+Fork do DeskcommCRM, de Rafael Melgaço, sob licença MIT. LICENSE e avisos originais preservados. A documentação upstream abaixo descreve o projeto original e seus caminhos de instalação/atualização.
+
+---
+
 <div align="center">
 
 🇧🇷 Português · [🇺🇸 English](README.en.md) · [🇪🇸 Español](README.es.md)

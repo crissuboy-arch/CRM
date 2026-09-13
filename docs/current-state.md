@@ -346,3 +346,11 @@ Duas lições que valem para quem mantiver este documento:
 2. **Este arquivo apodrece rápido.** O repo moveu 556 commits em poucos dias. Trate as datas
    do frontmatter como prazo de validade, não como enfeite — e prefira reconferir os números
    com os comandos citados a confiar na tabela.
+
+## 2026-09-10 — retomada da instalação local
+
+Estado desta etapa, evidências e bloqueios: [Instalação local](./local-setup-status.md). Preservados os registros históricos acima. Sem rebranding, tradução, migrations históricas ou push.
+
+## 2026-09-13 - NEXORA CRM
+
+Rebranding e estado atual: [PROJECT-STATUS.md](./PROJECT-STATUS.md).

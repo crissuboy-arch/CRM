@@ -137,3 +137,15 @@ backups/
 # commit posterior de remoção não tira o blob.
 .qa-backups/
 *.dump
+
+# Diagnósticos locais de ambiente: podem conter configuração sensível.
+env-error.txt
+.auth-check.cjs
+.password-update.cjs
+
+# Artefatos locais de instalação/diagnóstico; manter no disco, fora da publicação.
+/docs/audits/foundation-inventory.*
+/split-supabase-setup.cjs
+/supabase-setup-sql-editor.sql
+/supabase-sql-partes/
+.nexora-*

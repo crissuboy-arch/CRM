@@ -25,24 +25,24 @@ import type { Regua } from "./contraste";
 
 export const REGUA_DO_PRODUTO: Regua = {
   rampaDoProduto: [
-    "#f3f6f1",
-    "#e4ebe0",
-    "#c8d6c1",
-    "#a4ba9a",
-    "#82a077",
-    "#67885d",
-    "#506d48",
-    "#41573b",
-    "#374731",
-    "#2f3c2b",
-    "#171f15",
+    "#eff6ff",
+    "#dbeafe",
+    "#bfdbfe",
+    "#93c5fd",
+    "#60a5fa",
+    "#3b82f6",
+    "#2563eb",
+    "#1d4ed8",
+    "#1e40af",
+    "#1e3a8a",
+    "#172554",
   ],
   claro: {
     nome: "claro",
     base: [
       {
         chave: "--color-bg",
-        hex: "#faf9f6",
+        hex: "#f8fafc",
       },
       {
         chave: "--color-surface",
@@ -50,7 +50,7 @@ export const REGUA_DO_PRODUTO: Regua = {
       },
       {
         chave: "--color-surface-elevated",
-        hex: "#f5f3ee",
+        hex: "#eff6ff",
       },
     ],
     tingidas: [
@@ -183,15 +183,15 @@ export const REGUA_DO_PRODUTO: Regua = {
     base: [
       {
         chave: "--color-bg",
-        hex: "#161510",
+        hex: "#0a0f1c",
       },
       {
         chave: "--color-surface",
-        hex: "#1d1c17",
+        hex: "#0f172a",
       },
       {
         chave: "--color-surface-elevated",
-        hex: "#272620",
+        hex: "#122038",
       },
     ],
     tingidas: [
@@ -199,7 +199,7 @@ export const REGUA_DO_PRODUTO: Regua = {
         chave: "--color-accent-soft",
         fonte: {
           tipo: "literal",
-          hex: "#82a077",
+          hex: "#60a5fa",
           alfa: 0.16,
         },
       },
