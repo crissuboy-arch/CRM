@@ -6,15 +6,15 @@
  * quem escolher isso fora daqui vira o `if (provider === ...)` que o invariante
  * 1 da doutrina existe para proibir. O chamador pede o ref; a coluna é detalhe.
  *
- * O tipo é a tagged union que a migration 0087 já enforça no banco
- * (`channel_sessions_provider_ref_check`): a coluna do provider da vez é NOT
- * NULL, a do outro é NULL. Por isso o retorno é `string`, não `string | null` —
- * a garantia é do CHECK, não de otimismo.
+ * O tipo acompanha `channel_sessions_provider_ref_check` (0231): cada ramo
+ * exige sua referência. Instagram não reutiliza referências de WhatsApp.
+ * Por isso o retorno é `string`, não `string | null`.
  */
 export type ChannelSessionRef =
   | { provider: "waha"; waha_session_name: string }
   | { provider: "meta_cloud"; meta_phone_number_id: string }
-  | { provider: "zernio"; zernio_account_id: string };
+  | { provider: "zernio"; zernio_account_id: string }
+  | { provider: "instagram_meta"; instagram_account_id: string };
 
 /**
  * Colunas que um `select` do PostgREST precisa trazer para `resolveSessionRef`
@@ -22,10 +22,12 @@ export type ChannelSessionRef =
  * nomeia coluna de provider, e ela some da feature junto com a decisão.
  */
 export const CHANNEL_SESSION_REF_COLUMNS =
-  "provider, waha_session_name, meta_phone_number_id, zernio_account_id";
+  "provider, waha_session_name, meta_phone_number_id, zernio_account_id, instagram_account_id";
 
 export function resolveSessionRef(session: ChannelSessionRef): string {
   switch (session.provider) {
+    case "instagram_meta":
+      return session.instagram_account_id;
     case "meta_cloud":
       return session.meta_phone_number_id;
     case "waha":

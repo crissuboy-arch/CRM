@@ -62,6 +62,11 @@ const diasDeRetencao = (nome: string, padrao: number) =>
     });
 
 const schema = z.object({
+  // PHASE 1: nomes reservados, opcionais; não habilitam conexão ou transporte.
+  INSTAGRAM_APP_ID: z.string().optional(),
+  INSTAGRAM_APP_SECRET: z.string().optional(),
+  INSTAGRAM_WEBHOOK_VERIFY_TOKEN: z.string().optional(),
+  META_GRAPH_VERSION: z.string().optional(),
   // Node
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 

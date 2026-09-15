@@ -9,10 +9,10 @@ import type { OutboundMedia } from "@/lib/waha/media-send";
 
 export type { OutboundMedia };
 
-export type ChannelProvider = "waha" | "meta_cloud" | "zernio";
+export type ChannelProvider = "waha" | "meta_cloud" | "zernio" | "instagram_meta";
 
 export interface ChannelCapabilities {
-  /** Pode enviar texto livre a qualquer momento? false = exige template fora da janela. */
+  /** Pode enviar texto livre a qualquer momento? false = bloqueia fora da janela. */
   freeformOutsideWindow: boolean;
   /** A plataforma hospeda definições de mensagem que precisam de aprovação prévia. */
   requiresTemplates: boolean;

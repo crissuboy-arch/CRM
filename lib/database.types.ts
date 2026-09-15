@@ -269,6 +269,73 @@ export type Database = {
           { foreignKeyName: "appointment_recovery_receipts_enrollment_id_fkey"; columns: ["enrollment_id"]; isOneToOne: false; referencedRelation: "followup_enrollments"; referencedColumns: ["id"] }
         ]
       }
+      contact_channel_identities: {
+        Row: {
+          channel_session_id: string
+          contact_id: string
+          created_at: string
+          display_name: string | null
+          external_user_id: string
+          id: string
+          last_seen_at: string | null
+          organization_id: string
+          profile_metadata: Json
+          provider: string
+          updated_at: string
+          username: string | null
+        }
+        Insert: {
+          channel_session_id: string
+          contact_id: string
+          created_at?: string
+          display_name?: string | null
+          external_user_id: string
+          id?: string
+          last_seen_at?: string | null
+          organization_id: string
+          profile_metadata?: Json
+          provider: string
+          updated_at?: string
+          username?: string | null
+        }
+        Update: {
+          channel_session_id?: string
+          contact_id?: string
+          created_at?: string
+          display_name?: string | null
+          external_user_id?: string
+          id?: string
+          last_seen_at?: string | null
+          organization_id?: string
+          profile_metadata?: Json
+          provider?: string
+          updated_at?: string
+          username?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "contact_channel_identities_contact_fkey"
+            columns: ["organization_id", "contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["organization_id", "id"]
+          },
+          {
+            foreignKeyName: "contact_channel_identities_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "contact_channel_identities_session_fkey"
+            columns: ["organization_id", "channel_session_id", "provider"]
+            isOneToOne: false
+            referencedRelation: "channel_sessions"
+            referencedColumns: ["organization_id", "id", "provider"]
+          },
+        ]
+      }
       event_service_origins: {
         Row: { event_id: string; channel_session_id: string; organization_id: string; service_boundary: Json }
         Insert: { event_id: string; channel_session_id: string; organization_id: string; service_boundary: Json }
@@ -2975,6 +3042,7 @@ export type Database = {
           display_name: string | null
           engine: string
           id: string
+          instagram_account_id: string | null
           is_warmup_complete: boolean | null
           last_health_check_at: string | null
           last_status_change_at: string
@@ -3005,6 +3073,7 @@ export type Database = {
           display_name?: string | null
           engine?: string
           id?: string
+          instagram_account_id?: string | null
           is_warmup_complete?: boolean | null
           last_health_check_at?: string | null
           last_status_change_at?: string
@@ -3035,6 +3104,7 @@ export type Database = {
           display_name?: string | null
           engine?: string
           id?: string
+          instagram_account_id?: string | null
           is_warmup_complete?: boolean | null
           last_health_check_at?: string | null
           last_status_change_at?: string

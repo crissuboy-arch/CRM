@@ -11,6 +11,18 @@ import type { ChannelCapabilities, ChannelProvider } from "./types";
 export type { ChannelProvider, ChannelCapabilities };
 
 export const CHANNEL_CAPABILITIES: Record<ChannelProvider, ChannelCapabilities> = {
+  // Descritor conservador da foundation, sem adapter de envio disponível.
+  // Não herda templates, grupos ou cobrança por mensagem do WhatsApp Cloud.
+  instagram_meta: {
+    freeformOutsideWindow: false,
+    requiresTemplates: false,
+    canManageTemplates: false,
+    banRisk: false,
+    minIntervalMs: null,
+    voiceNote: "opus-only",
+    groups: "none",
+    costPerMessage: false,
+  },
   // Auto-restrição: falo quando quiser, mas o WhatsApp me bane se eu abusar.
   waha: {
     freeformOutsideWindow: true,
