@@ -9,8 +9,14 @@
  */
 import { z } from "zod";
 
+import { normalizarTag, normalizarTags } from "@/lib/contacts/tag-normalizada";
+import {
+  MAXIMO_DE_ETIQUETAS_NO_FILTRO,
+  MODOS_DE_ETIQUETA,
+} from "@/lib/inbox/marcador-da-conversa";
+import { isValidCpf, type PerfilDoPais } from "@/lib/legal/perfil-do-pais";
+
 const PHONE_REGEX = /^\+\d{8,15}$/;
-const CPF_DIGITS = /^\d{11}$/;
 
 /**
  * Teto de 32 KB no jsonb inteiro. O CHECK do banco só garante que é OBJETO —
@@ -27,23 +33,13 @@ const customFieldsSchema = z
   });
 
 /**
- * CPF check-digit validator (algoritmo oficial Receita Federal).
- * Rejeita repetidos (00000000000, 11111111111, ...) e dígitos verificadores inválidos.
+ * O mod-11 da Receita Federal mora no PERFIL do país
+ * (`lib/legal/perfil-do-pais.ts`), porque é ele quem responde pelo documento do
+ * titular — aqui fica só o re-export, para não existirem duas implementações da
+ * mesma regra. Quem importava deste módulo (rota de importação, testes,
+ * `lib/schemas/index.ts`) continua importando.
  */
-export function isValidCpf(raw: string): boolean {
-  const s = raw.replace(/\D/g, "");
-  if (!CPF_DIGITS.test(s) || /^(\d)\1{10}$/.test(s)) return false;
-  let sum = 0;
-  for (let i = 0; i < 9; i++) sum += parseInt(s[i]!, 10) * (10 - i);
-  let d1 = (sum * 10) % 11;
-  if (d1 === 10) d1 = 0;
-  if (d1 !== parseInt(s[9]!, 10)) return false;
-  sum = 0;
-  for (let i = 0; i < 10; i++) sum += parseInt(s[i]!, 10) * (11 - i);
-  let d2 = (sum * 10) % 11;
-  if (d2 === 10) d2 = 0;
-  return d2 === parseInt(s[10]!, 10);
-}
+export { isValidCpf };
 
 export const contactCreateSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -58,7 +54,9 @@ export const contactCreateSchema = z.object({
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
     .optional(),
-  tags: z.array(z.string()).optional(),
+  // O marcador nasce em caixa baixa, pela MESMA regra da tag de conversa: o
+  // "VIP" gravado verbatim não casava com o filtro `?tag=vip` (issue #1224).
+  tags: z.array(z.string()).transform(normalizarTags).optional(),
   source: z.string().min(1).default("manual"),
   source_metadata: z.record(z.string(), z.unknown()).optional(),
   consent: z.record(z.string(), z.unknown()).optional(),
@@ -71,6 +69,54 @@ export const contactPatchSchema = contactCreateSchema.partial().extend({
 });
 export type ContactPatch = z.infer<typeof contactPatchSchema>;
 
+/**
+ * O documento do titular vem do PERFIL DO PAÍS da organização (issue #1033).
+ *
+ * `contactCreateSchema` continua sendo a régua brasileira, para quem não tem um
+ * perfil em mãos. Estas fábricas trocam o campo do documento e a MENSAGEM do
+ * telefone (o E.164 é universal; o exemplo não era): tudo o mais é o MESMO
+ * schema, estendido, e não uma segunda cópia — duas listas de campos divergem
+ * no dia em que uma ganhar um campo novo.
+ *
+ * Por que fábrica e não ler o país aqui dentro: o schema é síncrono e puro, e a
+ * resposta certa vem do banco (`perfilDaOrganizacao`), resolvida uma vez por
+ * requisição na borda. O que NÃO se faz é deixar o corpo da requisição escolher
+ * o país — quem decide é a organização, pela coluna dela (mesma doutrina da
+ * moeda em `lib/catalogo/moeda-da-org.ts`).
+ */
+export function contactCreateSchemaDoPais(perfil: PerfilDoPais) {
+  return contactCreateSchema.extend({
+    cpf: z
+      .string()
+      .refine(perfil.documento.valida, perfil.documento.mensagemInvalido)
+      .optional(),
+    phone_number: telefoneDoPais(perfil),
+  });
+}
+
+/**
+ * O E.164 é universal; o EXEMPLO não. A mensagem de erro cravava
+ * `+5511999998888`, então a tela mostrava o exemplo do país no campo e ensinava
+ * o DDI brasileiro assim que a pessoa errava — dentro do mesmo formulário.
+ */
+function telefoneDoPais(perfil: PerfilDoPais) {
+  return z
+    .string()
+    .regex(PHONE_REGEX, `Telefone deve estar em formato E.164 (${perfil.telefoneExemplo})`)
+    .optional();
+}
+
+/** O mesmo, para o PATCH (`app/api/v1/contacts/[id]/route.ts`). */
+export function contactPatchSchemaDoPais(perfil: PerfilDoPais) {
+  return contactPatchSchema.extend({
+    cpf: z
+      .string()
+      .refine(perfil.documento.valida, perfil.documento.mensagemInvalido)
+      .optional(),
+    phone_number: telefoneDoPais(perfil),
+  });
+}
+
 export const CONTACT_ORDER_BY = [
   "last_activity_at",
   "created_at",
@@ -81,8 +127,52 @@ export const CONTACT_ORDER_BY = [
 
 export const contactListQuerySchema = z.object({
   search: z.string().optional(),
-  tag: z.string().optional(),
+  // O filtro normaliza pelo MESMO caminho da escrita: `?tag=VIP` acha o que a
+  // ficha gravou como "vip" (issue #1224).
+  //
+  // ⚠️ E agora VÁRIAS etiquetas (#1274). Aceita `string` OU `string[]`, e a
+  // repetição na URL (`?tag=vip&tag=orçamento`) é lida por `getAll`. Aceitar as
+  // DUAS formas é o que mantém o `?tag=vip` singular funcionando: `get` devolve
+  // string e `getAll` devolve array de um, e os dois precisam passar pelo MESMO
+  // schema — se este só aceitasse array, toda chamada antiga quebraria com 422.
+  tag: z
+    .union([
+      z.string().transform(normalizarTag),
+      z.array(z.string().transform(normalizarTag)).max(MAXIMO_DE_ETIQUETAS_NO_FILTRO),
+    ])
+    .optional()
+    .transform((v) => {
+      if (v === undefined) return undefined;
+      const lista = Array.isArray(v) ? v : [v];
+      // Lista VAZIA vira `undefined`, e não `[]` — mesma razão do schema do
+      // Inbox: `getAll` devolve `[]` sem o parâmetro, e `[]` num `cs` é um filtro
+      // que não casa nada, com o filtro desligado.
+      return lista.length > 0 ? lista : undefined;
+    }),
+  /**
+   * E ou OU entre as etiquetas escolhidas (#1274). `e` é o padrão — e é o que
+   * uma etiqueta só já significava, logo o parâmetro só importa havendo duas.
+   *
+   * `z.enum` recusa o valor fora dos dois, e a recusa vira 422: `?modo=xou` é
+   * quase sempre alguém copiando o nome do parâmetro errado, e a resposta
+   * ensina o integrador a corrigir. Na TELA quem lê é `modoDeEtiqueta`, que cai
+   * no `e` — uma tela não pode quebrar por um parâmetro inventado.
+   */
+  modo: z.enum(MODOS_DE_ETIQUETA).optional(),
   source: z.string().optional(),
+  /**
+   * Só pessoais / esconder pessoais (spec 21, etapa 13).
+   *
+   * `"true"`/`"false"` como TEXTO — vem de `searchParams`, que só conhece
+   * texto — e não `z.coerce.boolean()`, que transformaria `"false"` em `true`
+   * (o mesmo aviso de `is_group` em `lib/schemas/messaging.ts`). Aceita
+   * boolean de verdade porque o MCP chama este schema direto, sem URL no
+   * meio. Ausente = excluir pessoais: o padrão da lista e do MCP search.
+   */
+  pessoais: z
+    .union([z.boolean(), z.enum(["true", "false"])])
+    .optional()
+    .transform((v) => v === true || v === "true"),
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   order_by: z.enum(CONTACT_ORDER_BY).default("last_activity_at"),
@@ -125,3 +215,48 @@ export const contactsMergeSchema = z
     path: ["secondary_contact_ids"],
   });
 export type ContactsMergeInput = z.infer<typeof contactsMergeSchema>;
+
+/**
+ * POST /api/v1/contacts/bulk — as ações em lote da tela de Contatos (#2484, fatia F3).
+ *
+ * Só as três ações que têm caminho por CONTATO único, e nenhuma outra: a rota
+ * de lote encaminha cada id à rota individual, então entrar aqui é ter porta
+ * individual. `tag` e `custom-field` passam pelo MESMO PATCH da ficha
+ * (`/contacts/[id]`), `carteira` pela única porta que grava
+ * `contacts.carteira_user_id` (`/contacts/[id]/carteira`). "Mover card de
+ * etapa" e "marcar sempre humano" ficaram FORA por medição: a primeira é
+ * endereçada por NEGÓCIO (`/leads/[id]/move`), não por contato, e a segunda só
+ * é gravada pelo motor de atendimento — não existe porta individual.
+ *
+ * A organização NUNCA vem do corpo: cada subchamada lê a da SESSÃO, e este
+ * schema não tem campo para ela. O teto de ids é política da ROTA
+ * (`TETO_DO_LOTE`), não do schema — quem estoura recebe 422 `bulk_too_large`
+ * com o número na mensagem, e não um `validation_error` genérico.
+ */
+export const bulkContactActionSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("tag"),
+    ids: z.array(z.string().uuid()).min(1),
+    op: z.enum(["add", "remove"]),
+    // Normalizada no MESMO caminho da escrita (`normalizarTags`), e o PATCH
+    // re-normaliza: gravar "VIP" aqui e o filtro procurar "vip" é o defeito da
+    // issue #1224, que já está consertado do outro lado.
+    tag: z.string().trim().min(1).max(40),
+  }),
+  z.object({
+    action: z.literal("carteira"),
+    ids: z.array(z.string().uuid()).min(1),
+    /** `null` tira o cliente da carteira — mesmo contrato da rota individual. */
+    dono_user_id: z.string().uuid().nullable(),
+    origem: z.enum(["manual", "importacao", "atribuicao_automatica"]).optional(),
+  }),
+  z.object({
+    action: z.literal("custom-field"),
+    ids: z.array(z.string().uuid()).min(1),
+    chave: z.string().trim().min(1).max(80),
+    /** `null` apaga a chave; os demais campos do contato permanecem (MERGE). */
+    valor: z.union([z.string().max(500), z.number(), z.boolean(), z.null()]),
+  }),
+]);
+
+export type BulkContactActionInput = z.infer<typeof bulkContactActionSchema>;

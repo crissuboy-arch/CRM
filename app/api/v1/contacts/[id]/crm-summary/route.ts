@@ -26,19 +26,30 @@
  * alternativa (status por seção) triplicaria os estados no componente, e a
  * doença que esta rota cura é exatamente estados distintos colapsados num só.
  */
+import { createAdminClient } from "@/lib/supabase/admin";
+import { lerAnuncioDaMensagem, lerAnuncioDoContato, mesmoAnuncio } from "@/lib/leads/atribuicao-de-anuncio";
+import { prospectEnrichmentSchema } from "@/lib/prospecting/schema";
 import { randomUUID } from "node:crypto";
 import { type NextRequest } from "next/server";
 
 import { ok, fail } from "@/lib/api/wrappers";
-import { camposDoFunil, settingsDoEmbed } from "@/lib/leads/campos-do-funil";
+import { camposDoFunil, camposPorEscopo, settingsDoEmbed } from "@/lib/leads/campos-do-funil";
+import { motivosDoFunil } from "@/lib/leads/motivos-de-perda-do-funil";
 import { createClient } from "@/lib/supabase/server";
 import { nomesDosAtendentes } from "@/lib/users/nome-do-atendente";
 
 export const dynamic = "force-dynamic";
 
-/** Sem o embed do funil o painel não consegue montar os campos customizados. */
+/**
+ * Sem o embed do funil o painel não consegue montar os campos customizados.
+ * Nome do funil e da etapa entram porque dois leads de mesmo título em funis
+ * diferentes ficavam idênticos na lista (#943). `!inner` para filtrar funil
+ * arquivado no banco, antes do `limit(3)` — `pipeline_id` é NOT NULL.
+ */
+// `stage_id` e as `etapas` do funil alimentam o seletor de etapa do painel: mover
+// o negócio (ex.: "Pedido confirmado") direto da conversa, sem ir ao quadro.
 const LEAD_COLS =
-  "id, title, status, value_cents, currency, updated_at, pipeline_id, custom_fields, crm_pipelines(settings)";
+  "id, title, status, value_cents, currency, updated_at, pipeline_id, stage_id, custom_fields, crm_pipelines!inner(name, settings, is_archived, etapas:crm_stages!crm_stages_pipeline_id_fkey(id, name, position, is_won, is_lost, is_archived)), crm_stages!crm_leads_stage_id_fkey(name)";
 const ORDER_COLS = "id, external_id, status, total_cents, currency, created_at";
 /** Acompanha o que a timeline mostra — `reason` e `actor_kind` inclusive. */
 /**
@@ -82,14 +93,36 @@ export async function GET(
   }
 
   const { data: contactScope, error: scopeError } = await supabase.from("contacts")
-    .select("organization_id").eq("id", contactId).maybeSingle();
+    .select("organization_id, is_anonymized, source_metadata").eq("id", contactId).maybeSingle();
   if (scopeError) return fail("internal_error", scopeError.message, 500, { requestId });
   if (!contactScope) return fail("not_found", "Contato não encontrado.", 404, { requestId });
+  // Candidates are worker-only. Authorize the contact through RLS first, then
+  // scope this read to that exact contact and organization. Never expose raw data.
+  const enrichment = await (async () => {
+    if (contactScope.is_anonymized) return { enrichment: null, enrichment_error: false };
+    try {
+      const result = await createAdminClient().from("prospecting_candidates")
+        .select("data, created_at")
+        .eq("organization_id", contactScope.organization_id).eq("contact_id", contactId)
+        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      if (result.error) return { enrichment: null, enrichment_error: true };
+      if (!result.data) return { enrichment: null, enrichment_error: false };
+      const parsed = prospectEnrichmentSchema.safeParse(result.data.data);
+      return parsed.success
+        ? { enrichment: { ...parsed.data, collected_at: result.data.created_at }, enrichment_error: false }
+        : { enrichment: null, enrichment_error: true };
+    } catch {
+      return { enrichment: null, enrichment_error: true };
+    }
+  })();
+  const anuncios = await anunciosDoContato(supabase, contactId, contactScope);
   const [leads, orders, activities, demandas, fatos, historico] = await Promise.all([
     supabase
       .from("crm_leads")
       .select(LEAD_COLS)
       .eq("contact_id", contactId).eq("organization_id", contactScope.organization_id)
+      // Arquivar o funil não fecha os leads; sem isto eles seguiam aqui como abertos.
+      .eq("crm_pipelines.is_archived", false)
       .order("updated_at", { ascending: false })
       .limit(3),
     supabase
@@ -142,6 +175,7 @@ export async function GET(
 
   return ok(
     {
+      ...enrichment,
       leads: (leads.data ?? []).map((row) => comCamposDoFunil(row as Record<string, unknown>)),
       orders: orders.data ?? [],
       activities: linhas.map((a) => ({
@@ -152,15 +186,76 @@ export async function GET(
       })),
       demandas: demandas.data ?? [],
       fatos: fatos.data ?? [], historico: historico.data ?? [],
+      ...anuncios,
     },
     { requestId },
   );
 }
 
+/**
+ * De qual anúncio a pessoa veio, para o painel ao lado da conversa.
+ *
+ * Dois anúncios, porque são duas perguntas: o de ORIGEM (primeiro toque, o que
+ * o contato guarda e nunca reescreve) e o MAIS RECENTE que ela clicou, quando é
+ * outro — numa loja com vários produtos, quem chegou pelo anúncio de um e
+ * voltou pelo de outro está falando do segundo.
+ *
+ * Auxiliar e por isso fora do `Promise.all` de cima: a leitura da mensagem que
+ * falha vira "sem anúncio mais recente", nunca um painel inteiro em erro. E
+ * contato anonimizado não mostra anúncio nenhum.
+ */
+async function anunciosDoContato(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  contactId: string,
+  contato: { organization_id: string; is_anonymized: boolean | null; source_metadata: unknown },
+) {
+  if (contato.is_anonymized) return { anuncio_de_origem: null, anuncio_mais_recente: null };
+  const origem = lerAnuncioDoContato(contato.source_metadata);
+  const { data, error } = await supabase
+    .from("messages")
+    .select("anuncio:metadata->anuncio, created_at")
+    .eq("contact_id", contactId)
+    .eq("organization_id", contato.organization_id)
+    .eq("direction", "inbound")
+    .not("metadata->anuncio", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const linha = error ? null : (data as { anuncio: unknown; created_at: string } | null);
+  const recente = linha ? lerAnuncioDaMensagem(linha.anuncio) : null;
+  const outro = recente && !(origem && mesmoAnuncio(origem, recente));
+  return {
+    anuncio_de_origem: origem,
+    anuncio_mais_recente: outro ? { ...recente, recebido_em: linha!.created_at } : null,
+  };
+}
+
 function comCamposDoFunil(row: Record<string, unknown>) {
-  const { crm_pipelines, ...lead } = row;
+  const { crm_pipelines, crm_stages, ...lead } = row;
   return {
     ...lead,
-    field_defs: camposDoFunil(settingsDoEmbed(crm_pipelines)),
+    field_defs: camposPorEscopo(camposDoFunil(settingsDoEmbed(crm_pipelines)), "negocio"),
+    funil_nome: nomeDoEmbed(crm_pipelines),
+    etapa_nome: nomeDoEmbed(crm_stages),
+    etapas_do_funil: etapasDoEmbed(crm_pipelines),
+    // O painel da conversa não tem o quadro em cache; sem isto a janela de perda cairia no padrão do produto.
+    motivos_de_perda: motivosDoFunil(settingsDoEmbed(crm_pipelines)),
   };
+}
+
+/** As etapas ATIVAS do funil do negócio, na ordem do quadro. */
+function etapasDoEmbed(embed: unknown): Array<{ id: string; name: string; is_won: boolean; is_lost: boolean }> {
+  const alvo = Array.isArray(embed) ? embed[0] : embed;
+  const etapas = (alvo as { etapas?: unknown } | null)?.etapas;
+  if (!Array.isArray(etapas)) return [];
+  return (etapas as Array<{ id: string; name: string; position: number | string; is_won: boolean; is_lost: boolean; is_archived: boolean }>)
+    .filter((e) => !e.is_archived)
+    .sort((a, b) => Number(a.position) - Number(b.position))
+    .map((e) => ({ id: e.id, name: e.name, is_won: e.is_won, is_lost: e.is_lost }));
+}
+
+function nomeDoEmbed(embed: unknown): string | null {
+  const alvo = Array.isArray(embed) ? embed[0] : embed;
+  const nome = (alvo as { name?: unknown } | null)?.name;
+  return typeof nome === "string" ? nome : null;
 }

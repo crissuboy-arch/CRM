@@ -102,6 +102,34 @@ export type ActivityType =
   | "conversation_released"
   | "conversation_ai_paused"
   /**
+   * Chamada de voz WhatsApp (WaCalls, spec 18) encerrada — gravada na timeline
+   * junto com mensagens/notas. Emitida pela ponte de eventos do worker
+   * (`lib/wacalls/events-bridge.ts`) ao receber `call-ended`, via
+   * `emitAgentActivityForContact` (mesmo roteador contato→lead que o resto do
+   * sistema usa, `sourceModule: 'voice_calls'`).
+   */
+  | "voice_call"
+  /**
+   * Chamada de voz que TOCOU e ninguém atendeu.
+   *
+   * Tipo próprio, e não um campo dentro de `voice_call`, porque quem decide o
+   * que fazer com esta linha é um TRIGGER que só enxerga `new.type`:
+   * `fn_update_last_activity_at` (migration 0079) carimba `last_activity_at`
+   * pela lista positiva de tipos. Uma ligação atendida quebra o silêncio do
+   * negócio; um telefone que tocou sem resposta é constatação de silêncio, e
+   * carimbar ali esfriaria o Radar de Risco por um contato com quem ninguém
+   * falou. Os dois desfechos precisam ser distinguíveis lá dentro.
+   */
+  | "voice_call_missed"
+  /**
+   * Ligação FEITA pelo CRM que ninguém atendeu. Não é "perdida": quem discou
+   * sabe que ninguém pegou, e o rótulo da linha do tempo sai do TIPO — gravar
+   * `voice_call_missed` aqui escrevia "Chamada de voz perdida" no negócio de
+   * quem acabou de ligar. Fora da lista positiva de `fn_update_last_activity_at`
+   * pelo mesmo motivo de `voice_call_missed`: ninguém falou com ninguém.
+   */
+  | "voice_call_unanswered"
+  /**
    * A TAREFA COMBINADA, na linha do tempo do negócio (migration 0210).
    *
    * "Ligar de volta na terça" só existe por causa de um negócio. Sem estas duas
@@ -116,6 +144,16 @@ export type ActivityType =
   | "task_created"
   | "task_completed"
   /**
+   * O PLANO de tarefas (#1752) aplicado ao negócio — a sequência reutilizável
+   * (`organizations.settings.task_plans`) que virou N tarefas de uma vez.
+   *
+   * A linha é DUAS coisas: o "foi aplicado" que quem abre o card lê, e a MARCA
+   * de idempotência que `lib/tarefas/plano.ts` consulta antes de criar — sem
+   * coluna `plan_id` em `crm_tasks` (migration), esta é a única identidade
+   * exata de "este plano já rodou aqui" que o banco guarda.
+   */
+  | "task_plan_applied"
+  /**
    * DOIS CADASTROS DA MESMA PESSOA VIRARAM UM. Emitido por
    * `fn_mesclar_contatos` (migration 0215) em cada negócio que o contato
    * vencedor passou a ter — inclusive nos que ELE não tinha e herdou do
@@ -129,10 +167,43 @@ export type ActivityType =
    * doutrina de migrations), então o banco aceitaria a divergência calado e a
    * timeline cairia no fallback.
    */
-  | "contacts_merged";
+  | "contacts_merged"
+  /**
+   * O negócio nasceu da TROCA DE FUNIL (`POST /api/v1/leads/[id]/clone`).
+   *
+   * ⚠️ Não é `lead_created`: aquele diz "Entrou no funil" pela primeira
+   * mensagem de um canal, e este negócio não entrou por canal nenhum — ele veio de outro funil, e é isso que
+   * quem abre o card no destino precisa ler. O outro lado da troca é a
+   * `demand_closed` da origem, com a razão "Levado para o funil X".
+   */
+  | "moved_from_pipeline"
+  | "proposal_drafted"
+  | "proposal_sent"
+  | "proposal_accepted"
+  | "proposal_declined"
+  | "proposal_expired"
+  | "proposal_value_changed"
+  /**
+   * N2 — o envio tentou agendar o follow-up automático e NÃO conseguiu por um
+   * motivo que não é "já existe retorno" (esse tem atividade própria, a do
+   * retorno que já serve). Sem esta linha, "a proposta foi enviada e nenhum
+   * retorno veio" seria indistinguível de "o retorno está a caminho" — e é
+   * justamente no silêncio que a demanda morre. O PORQUÊ vai no `reason`.
+   */
+  | "proposal_followup_skipped"
+  /**
+   * O CONTATO VIROU PESSOAL / DEIXOU DE SER PESSOAL (spec 21).
+   *
+   * Tipos próprios, e não `note`, porque quem decide o que some da vista é um
+   * FILTRO que só enxerga `new.type`: sem tipo próprio, marcar não teria como
+   * pendurar a prova na timeline do negócio — e sem negócio aberto não há linha
+   * possível (`lead_id` é NOT NULL), só auditoria (D6).
+   */
+  | "contact_marked_personal"
+  | "contact_unmarked_personal";
 
 export const ACTIVITY_LABELS: Record<ActivityType, string> = {
-  lead_created: "Entrou pelo WhatsApp",
+  lead_created: "Entrou no funil",
   stage_changed: "Mudou de estágio",
   agent_move_corrected: "Correção do que o assistente tinha feito",
   note: "Anotação",
@@ -219,13 +290,29 @@ export const ACTIVITY_LABELS: Record<ActivityType, string> = {
   // arquivos e o controle NEGATIVO de `handoff-por-orcamento.test.ts` usa
   // literalmente "Voltar para a IA" como a sabotagem que deve reprovar.
   conversation_ai_paused: "Pausou o automático",
+  voice_call: "Chamada de voz",
+  voice_call_missed: "Chamada de voz perdida",
+  voice_call_unanswered: "Chamada de voz sem resposta",
   task_created: "Tarefa combinada",
   task_completed: "Tarefa concluída",
+  task_plan_applied: "Plano de tarefas aplicado",
   // Rótulo com OBJETO e sem jargão de banco: "Mesclado" sozinho é palavra de
   // engenheiro. O que aconteceu, para quem lê a timeline do negócio, é que dois
   // cadastros da mesma pessoa viraram um — e é por isso que este negócio pode
   // ter mudado de contato sem ninguém tê-lo movido.
   contacts_merged: "Contatos duplicados juntados",
+  moved_from_pipeline: "Veio de outro funil",
+  proposal_drafted: "Rascunho de proposta criado",
+  proposal_sent: "Proposta enviada",
+  proposal_accepted: "Proposta aceita",
+  proposal_declined: "Proposta recusada",
+  proposal_expired: "Proposta venceu sem decisão",
+  proposal_value_changed: "Valor do negócio atualizado pela proposta",
+  proposal_followup_skipped: "Follow-up automático não agendado",
+  // Rótulos com o veredito, nunca o mecanismo: quem lê a timeline quer saber
+  // que o contato saiu da operação (ou voltou), não o nome da coluna.
+  contact_marked_personal: "Marcado como pessoal",
+  contact_unmarked_personal: "Desmarcado como pessoal",
 };
 
 /** Quando o tipo é legado/desconhecido, a linha ainda é honesta — sem jargão. */

@@ -4,6 +4,8 @@ import type { EmailOtpType } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { ensureTenantForUser } from "@/lib/auth/provision";
 import { decidirConviteDoSignup } from "@/lib/auth/convite-no-signup";
+import { modoDeCadastro } from "@/lib/auth/politica-de-cadastro";
+import { aplicarConvite } from "@/lib/auth/aplicar-convite";
 import { audit } from "@/lib/audit";
 import { env } from "@/lib/env";
 
@@ -56,18 +58,81 @@ import { env } from "@/lib/env";
  * Fluxo canônico do @supabase/ssr: verifyOtp/exchangeCodeForSession grava os
  * cookies de sessão via cookies() do next/headers; o Next anexa os Set-Cookie
  * ao redirect retornado.
+ *
+ * ── ABRIR O LINK NÃO GASTA O TOKEN ──────────────────────────────────────────
+ *
+ * O `token_hash` é de uso único, e quem abre o link primeiro fica com ele.
+ * Medido numa instalação real em 2026-10-03, nos logs do Supabase Auth: ~12 s
+ * depois de cada e-mail de recuperação para um endereço Hotmail, um `verify`
+ * com 200 consumia o token — o verificador de links da Microsoft visitando o
+ * link na entrega — e o clique de verdade caía em `One-time token not found`.
+ * O mesmo vale para convite e confirmação de cadastro, e para qualquer filtro
+ * corporativo que pré-visite links (Safe Links, gateways de e-mail, antivírus).
+ *
+ * Por isso o GET com `token_hash` NÃO chama o provedor: leva a
+ * `/login/continuar`, que mostra um botão. Quem gasta o token é o POST desse
+ * botão — verificador automático segue link, não aperta botão de formulário.
+ * O formato `code` segue no GET como antes, e esta proteção NÃO o alcança: no
+ * template padrão o link do e-mail aponta para o `/auth/v1/verify` do GoTrue,
+ * que gasta o OTP lá, antes de redirecionar para cá com o `code` — um
+ * verificador que abra esse link gasta o OTP fora do nosso alcance (não
+ * medido; é a leitura do caminho descrito no início deste comentário). O
+ * conserto para esse formato é o mesmo de sempre: subir os templates
+ * customizados (`hostgator-setup-kit/marca-emails.sh`), que trocam o link pelo
+ * `token_hash` e caem na proteção acima.
  */
 export async function GET(request: NextRequest) {
   const url = request.nextUrl;
   const tokenHash = url.searchParams.get("token_hash");
   const code = url.searchParams.get("code");
-  const type = url.searchParams.get("type") as EmailOtpType | null;
+  const type = url.searchParams.get("type");
+
+  if (tokenHash && type) {
+    const continuar = new URL("/login/continuar", env.NEXT_PUBLIC_APP_URL);
+    continuar.searchParams.set("type", type);
+    continuar.searchParams.set("token_hash", tokenHash);
+    return NextResponse.redirect(continuar);
+  }
+
+  return confirmar({ tokenHash: null, code, type: type as EmailOtpType | null, request, status: 307 });
+}
+
+/** O botão "Continuar" de `/login/continuar` — o único caminho que gasta o `token_hash`. */
+export async function POST(request: NextRequest) {
+  const form = await request.formData().catch(() => null);
+  const campo = (nome: string) => {
+    const valor = form?.get(nome);
+    return typeof valor === "string" && valor.length > 0 ? valor : null;
+  };
+  // 303 e não 307: o 307 repetiria o POST no destino (`/login/reset`, `/app`…).
+  return confirmar({
+    tokenHash: campo("token_hash"),
+    code: null,
+    type: campo("type") as EmailOtpType | null,
+    request,
+    status: 303,
+  });
+}
+
+async function confirmar({
+  tokenHash,
+  code,
+  type,
+  request,
+  status,
+}: {
+  tokenHash: string | null;
+  code: string | null;
+  type: EmailOtpType | null;
+  request: NextRequest;
+  status: 303 | 307;
+}) {
   const requestId = request.headers.get("x-request-id");
 
   // NUNCA usar url.origin aqui: é derivado do header Host, que o proxy/container
   // pode entregar como o bind interno (ex.: 0.0.0.0:3000) em vez do domínio
   // público — o link de recovery quebra silenciosamente para o usuário final.
-  const redirectTo = (path: string) => NextResponse.redirect(new URL(path, env.NEXT_PUBLIC_APP_URL));
+  const redirectTo = (path: string) => NextResponse.redirect(new URL(path, env.NEXT_PUBLIC_APP_URL), status);
 
   if (!(tokenHash && type) && !code) {
     return redirectTo("/login?error=link_invalido");
@@ -84,7 +149,26 @@ export async function GET(request: NextRequest) {
       ? await supabase.auth.verifyOtp({ type, token_hash: tokenHash })
       : await supabase.auth.exchangeCodeForSession(code as string);
 
-  if (error || !data.user) {
+  // CLICAR DUAS VEZES NO MESMO LINK não é motivo para expulsar ninguém.
+  // O token é de uso único: o segundo clique cai aqui com "Email link is
+  // invalid or has expired" — e a pessoa está logada, porque o PRIMEIRO clique
+  // firmou a sessão. Medido em 2026-09-10, no rig e numa instalação real:
+  // `@supabase/ssr` NÃO apaga o cookie de sessão quando o `verifyOtp` falha
+  // (o cookie continua na jar e o `getUser()` seguinte devolve o usuário).
+  // Mandar essa pessoa para `/login?error=link_invalido` era, medido, o que
+  // fazia dois convidados reais reentrarem pela senha e perderem o fio do
+  // convite — terminando dentro do CRM sem organização e sem menu.
+  let usuario = data?.user ?? null;
+  let sessaoPreservada = false;
+  if (error || !usuario) {
+    const { data: jaAutenticado } = await supabase.auth.getUser();
+    if (jaAutenticado.user) {
+      usuario = jaAutenticado.user;
+      sessaoPreservada = true;
+    }
+  }
+
+  if (!usuario) {
     await audit({
       action: "auth.email_link_rejected",
       // `formato` é o campo que faltava: sem ele os dois modos de falha
@@ -100,6 +184,24 @@ export async function GET(request: NextRequest) {
     return redirectTo(viaTokenHash ? "/login?error=link_invalido" : "/login?error=template_padrao");
   }
 
+  if (sessaoPreservada) {
+    // O link falhou — isso continua sendo fato e continua auditado. O que muda
+    // é o desfecho: seguimos com a sessão que já existia, e o `formato` mais o
+    // `sessao_preservada` deixam a triagem distinguir este caso do outro sem
+    // adivinhar.
+    await audit({
+      action: "auth.email_link_rejected",
+      actorUserId: usuario.id,
+      metadata: {
+        type,
+        formato: viaTokenHash ? "token_hash" : "code",
+        reason: error?.message ?? "no_user",
+        sessao_preservada: true,
+      },
+      requestId,
+    });
+  }
+
   if (type === "recovery") {
     return redirectTo("/login/reset");
   }
@@ -109,14 +211,14 @@ export async function GET(request: NextRequest) {
   // nenhum, e `ensureTenantForUser` faz o que faria com qualquer visitante:
   // abre uma empresa e o torna admin dela. A pessoa fica com uma organização
   // fantasma, um wizard que não é dela e o gate de MFA de administrador.
-  const decisao = decidirConviteDoSignup(data.user);
+  const decisao = decidirConviteDoSignup(usuario);
 
   if (decisao.tipo === "recusar") {
     // Falha FECHADA: havia convite e ele não vale (expirado ou de outra pessoa).
     // Provisionar aqui seria devolver o defeito com um conserto por cima.
     await audit({
       action: "auth.signup_provision_recusado",
-      actorUserId: data.user.id,
+      actorUserId: usuario.id,
       metadata: { motivo: decisao.motivo },
       requestId,
     });
@@ -124,18 +226,59 @@ export async function GET(request: NextRequest) {
   }
 
   if (decisao.tipo === "convite") {
-    // A sessão já está firmada, então a tela de aceite reconhece o usuário e o
-    // clique cai no `acceptInviteAction` que já existe — auditado e idempotente.
-    // Nenhuma lógica de membership nova mora aqui.
+    // TERMINAR O SERVIÇO. Aqui já se sabe tudo o que o botão "Aceitar convite"
+    // exigia — e com garantia mais forte: o token verificou (via
+    // `decidirConviteDoSignup`) e o e-mail do convite bate com o que o PROVEDOR
+    // DE AUTH acabou de confirmar, não com o que a sessão diz.
+    //
+    // Daqui saía um redirect para uma tela com um botão. Medido em duas
+    // tentativas reais de um mesmo convidado: ninguém chegava a apertá-lo — na
+    // primeira o segundo clique no e-mail derrubou o fluxo, na segunda a tela
+    // veio pedindo login — e a pessoa terminava autenticada, sem organização e
+    // sem menu, porque o VÍNCULO é o que dá as duas coisas.
+    const aceite = await aplicarConvite({
+      userId: usuario.id,
+      payload: decisao.payload,
+      requestId,
+    });
+    if (aceite.ok) return redirectTo("/app");
+
+    // Convite revogado, ou banco fora: a tela de aceite continua existindo e
+    // sabe explicar cada caso. Degradar para ela preserva exatamente o
+    // comportamento anterior, em vez de deixar a pessoa sem saída.
     return redirectTo(`/team/accept-invite/${decisao.token}`);
   }
 
+  // A TRAVA QUE MAIS IMPORTA. Aqui é onde a organização nasce, e este ponto
+  // pega inclusive a conta que nasceu FORA da tela de cadastro — por uma chamada
+  // direta à server action, ou por uma conta criada pela admin API do GoTrue.
+  // Sem ele, fechar o cadastro seria decoração: bastaria pular a tela.
+  //
+  // Depois de `decidirConviteDoSignup`, de propósito: quem tem convite válido já
+  // saiu acima, então esta guarda só alcança quem chegou sem convite nenhum.
+  const modo = await modoDeCadastro();
+  if (modo === "so_convite") {
+    await audit({
+      action: "auth.signup_provision_recusado",
+      actorUserId: usuario.id,
+      metadata: { motivo: "somente_convite" },
+      requestId,
+    });
+    return redirectTo("/login?error=cadastro_por_convite");
+  }
+
+  // COM APROVAÇÃO (migration 0383): a empresa NÃO nasce aqui. O pedido é
+  // enviado em `/get-started`, que é onde já chega quem ficou sem empresa por
+  // qualquer outro caminho — uma porta só, e a trava mora na action dela
+  // (`recoverOrganization`), não nesta rota.
+  if (modo === "com_aprovacao") return redirectTo("/get-started");
+
   try {
-    await ensureTenantForUser(data.user);
+    await ensureTenantForUser(usuario);
   } catch (e) {
     await audit({
       action: "auth.signup_provision_failed",
-      actorUserId: data.user.id,
+      actorUserId: usuario.id,
       metadata: { reason: e instanceof Error ? e.message : String(e) },
       requestId,
     });
@@ -147,7 +290,7 @@ export async function GET(request: NextRequest) {
 
   void audit({
     action: "auth.signup_confirmed",
-    actorUserId: data.user.id,
+    actorUserId: usuario.id,
     metadata: {},
     requestId,
   });

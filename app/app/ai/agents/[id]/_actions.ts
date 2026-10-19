@@ -23,7 +23,7 @@ import { audit } from "@/lib/audit";
 import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
 import { ROLE_RANK } from "@/lib/auth/types";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { mensagemDoEscopo, validarEscopoDaVersao } from "@/lib/ai/agents/escopo";
+import { codigoDoEscopo, mensagemDoEscopo, validarEscopoDaVersao } from "@/lib/ai/agents/escopo";
 import {
   agentMcpCreateSchema,
   agentMcpPatchSchema,
@@ -33,12 +33,13 @@ import {
 } from "@/lib/ai/agents/validation";
 import { publishAgentVersion } from "@/lib/ai/agents/publish";
 import { escolherVersoesDaTela } from "@/lib/ai/agents/versoes-da-tela";
+import { toolIdAceito } from "@/lib/mcp/servidor-externo/ids";
 import { VALID_TOOL_IDS } from "@/lib/mcp/tools";
 
 const UUID_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const VERSION_COLUMNS =
-  "id, organization_id, agent_id, version_number, system_prompt, provider, model, credential_id, tool_ids, trigger_config, channel_session_id, max_steps, token_budget, cost_budget_cents, history_message_window, history_token_window, handoff_keywords, handoff_tool_enabled, cases_enabled, split_messages, split_max_chars, followup, operator_enabled, operator_model, operator_tool_ids, status, published_at, superseded_at, created_at, created_by,pipeline_ids,knowledge_source_ids,provisioning_origin";
+  "id, organization_id, agent_id, version_number, system_prompt, provider, model, credential_id, tool_ids, trigger_config, channel_session_id, max_steps, token_budget, cost_budget_cents, history_message_window, history_token_window, handoff_keywords, handoff_tool_enabled, handoff_legal_enabled, proposal_ai_draft_enabled, cases_enabled, split_messages, split_max_chars, followup, operator_enabled, operator_model, operator_tool_ids, status, published_at, superseded_at, created_at, created_by,pipeline_ids,knowledge_source_ids,provisioning_origin,inbound_debounce_ms";
 
 type ActionResult<T = void> =
   | { ok: true; data?: T }
@@ -137,8 +138,12 @@ export async function saveAgentDraftAction(
   // conferido depois, uma ordem inválida devolveria erro com a versão já
   // gravada; se fosse GRAVADO antes, um escopo inválido devolveria erro com o
   // nome já trocado — a lista mostrando o novo e o editor o velho.
-  // `agentMcpPatchSchema` é a régua que a rota REST já usa: uma quarta régua
-  // para o mesmo campo é o defeito seguinte.
+  // `agentMcpPatchSchema` NÃO é a régua da rota REST (essa é `agentPatchSchema`,
+  // em lib/ai/guardrails-schema.ts — mais estrita em name/description). É a régua
+  // do cadastro do editor MCP, a mesma do formulário (AgentForm.tsx) e alinhada de
+  // propósito com `agentMcpCreateSchema`, para criar e editar terem a mesma régua.
+  // A afirmação de equivalência com o REST era falsa e ficou parada aqui até o
+  // achado #532 medir a divergência.
   const cadastroParsed =
     cadastro === undefined ? null : agentMcpPatchSchema.safeParse(cadastro);
   if (cadastroParsed && !cadastroParsed.success) {
@@ -163,11 +168,14 @@ export async function saveAgentDraftAction(
   // material apagado (ou de outra organização) produz uma configuração muda: a
   // tela mostra a marcação, o assistente não acha nada, e ninguém vê erro.
   const escopo = await validarEscopoDaVersao(admin, activeOrg.orgId, {
+    provider: v.provider,
     pipeline_ids: v.pipeline_ids,
     knowledge_source_ids: v.knowledge_source_ids,
+    credential_id: v.credential_id,
+    channel_session_id: v.channel_session_id,
   });
   if (!escopo.ok) {
-    return { ok: false, error: "validation_failed", message: mensagemDoEscopo(escopo) };
+    return { ok: false, error: codigoDoEscopo(escopo), message: mensagemDoEscopo(escopo) };
   }
 
   // Em QUAL rascunho esta escrita cai — pela MESMA régua que a tela usa para
@@ -307,6 +315,8 @@ export async function saveAgentDraftAction(
         history_token_window: v.history_token_window,
         handoff_keywords: v.handoff_keywords,
         handoff_tool_enabled: v.handoff_tool_enabled,
+        handoff_legal_enabled: v.handoff_legal_enabled,
+        proposal_ai_draft_enabled: v.proposal_ai_draft_enabled,
         cases_enabled: v.cases_enabled,
         operator_enabled: v.operator_enabled,
         operator_model: v.operator_model,
@@ -315,6 +325,7 @@ export async function saveAgentDraftAction(
         knowledge_source_ids: v.knowledge_source_ids,
         split_messages: v.split_messages,
         split_max_chars: v.split_max_chars,
+        inbound_debounce_ms: v.inbound_debounce_ms ?? null,
         followup: v.followup,
         status: "draft",
         created_by: authUser.id,
@@ -391,7 +402,7 @@ export async function publishAgentAction(
     return { ok: false, error: "version_not_found" };
   }
   const tools = (targetV.tool_ids ?? []) as string[];
-  const invalid = tools.filter((t) => !valid.has(t));
+  const invalid = tools.filter((t) => !toolIdAceito(t, valid));
   if (invalid.length > 0) {
     return { ok: false, error: "tool_id_invalid", details: { invalid } };
   }
@@ -400,6 +411,7 @@ export async function publishAgentAction(
     orgId: activeOrg.orgId,
     agentId,
     versionId,
+    quemPublicou: { actorUserId: authUser.id, requestId },
   });
 
   if (!result.ok) {
@@ -414,6 +426,13 @@ export async function publishAgentAction(
     .insert({
       organization_id: activeOrg.orgId,
       event_type: "ai_agent.published",
+      // `entity_kind` é NOT NULL sem default (`baseline.sql`): sem esta linha o
+      // insert viola a constraint e o evento de publicação NUNCA é gravado. E o
+      // insert é `void` + `.then()`, então a violação cai num `console.error`
+      // que ninguém lê — o Sistema Vivo perde o registro em silêncio. Visto no
+      // log do CI de hoje: `null value in column "entity_kind" ... violates
+      // not-null constraint`.
+      entity_kind: "ai_agent",
       payload: {
         agent_id: result.agent_id,
         version_id: result.version_id,
@@ -493,9 +512,18 @@ export async function revertToVersionAction(
   // Espelha tool_id check do publish.
   const tools = ((source as { tool_ids: string[] | null }).tool_ids ?? []) as string[];
   const valid = new Set<string>(VALID_TOOL_IDS as readonly string[]);
-  const invalid = tools.filter((t) => !valid.has(t));
+  const invalid = tools.filter((t) => !toolIdAceito(t, valid));
   if (invalid.length > 0) {
     return { ok: false, error: "tool_id_invalid", details: { invalid } };
+  }
+
+  // Voltar a uma versão de quando a assinatura estava ligada regravaria o
+  // provedor que a instalação desligou — a mesma régua do salvar.
+  const escopo = await validarEscopoDaVersao(admin, activeOrg.orgId, {
+    provider: (source as { provider: string }).provider,
+  });
+  if (!escopo.ok) {
+    return { ok: false, error: codigoDoEscopo(escopo), message: mensagemDoEscopo(escopo) };
   }
 
   // Cria draft idêntica com retry em 23505 (race no version_number).
@@ -506,7 +534,9 @@ export async function revertToVersionAction(
     credential_id: string;
     tool_ids: string[];
     trigger_config: Record<string, unknown> | null;
-    channel_session_id: string;
+    // Nulo desde a 0239: a versão de origem pode ser um rascunho de quem ainda
+    // não conectou o WhatsApp, e duplicá-la copia o "sem número" adiante.
+    channel_session_id: string | null;
     max_steps: number;
     token_budget: number;
     cost_budget_cents: number;
@@ -514,6 +544,8 @@ export async function revertToVersionAction(
     history_token_window: number;
     handoff_keywords: string[];
     handoff_tool_enabled: boolean;
+    handoff_legal_enabled: boolean;
+    proposal_ai_draft_enabled: boolean;
     cases_enabled: boolean;
     operator_enabled: boolean;
     operator_model: string | null;
@@ -522,6 +554,8 @@ export async function revertToVersionAction(
     knowledge_source_ids: string[];
     split_messages: boolean;
     split_max_chars: number;
+    inbound_debounce_ms: number | null;
+    followup: unknown;
   };
   const src = source as unknown as SourceRow;
 
@@ -558,6 +592,11 @@ export async function revertToVersionAction(
         history_token_window: src.history_token_window,
         handoff_keywords: src.handoff_keywords,
         handoff_tool_enabled: src.handoff_tool_enabled,
+        // Reverter/duplicar leva a chave junto: voltar para uma versão sem ela
+        // seria publicar uma configuração que nunca existiu (mesma régua de
+        // `pipeline_ids` logo abaixo).
+        handoff_legal_enabled: src.handoff_legal_enabled,
+        proposal_ai_draft_enabled: src.proposal_ai_draft_enabled,
         cases_enabled: src.cases_enabled,
         operator_enabled: src.operator_enabled,
         operator_model: src.operator_model,
@@ -570,6 +609,8 @@ export async function revertToVersionAction(
         knowledge_source_ids: src.knowledge_source_ids ?? [],
         split_messages: src.split_messages,
         split_max_chars: src.split_max_chars,
+        inbound_debounce_ms: src.inbound_debounce_ms ?? null,
+        followup: src.followup,
         status: "draft",
         created_by: authUser.id,
       })
@@ -593,6 +634,7 @@ export async function revertToVersionAction(
     orgId: activeOrg.orgId,
     agentId,
     versionId: createdId,
+    quemPublicou: { actorUserId: authUser.id, requestId },
   });
   if (!result.ok) {
     // Rollback: remove draft órfã para não deixar lixo (a draft só existe
@@ -614,6 +656,13 @@ export async function revertToVersionAction(
     .insert({
       organization_id: activeOrg.orgId,
       event_type: "ai_agent.published",
+      // `entity_kind` é NOT NULL sem default (`baseline.sql`): sem esta linha o
+      // insert viola a constraint e o evento de publicação NUNCA é gravado. E o
+      // insert é `void` + `.then()`, então a violação cai num `console.error`
+      // que ninguém lê — o Sistema Vivo perde o registro em silêncio. Visto no
+      // log do CI de hoje: `null value in column "entity_kind" ... violates
+      // not-null constraint`.
+      entity_kind: "ai_agent",
       payload: {
         agent_id: result.agent_id,
         version_id: result.version_id,
@@ -671,6 +720,12 @@ export async function createMcpAgentAction(
   const requestId = randomUUID();
   const admin = createAdminClient();
 
+  // Antes da primeira escrita: recusado aqui, não sobra agente órfão.
+  const escopo = await validarEscopoDaVersao(admin, activeOrg.orgId, parsed.data.version);
+  if (!escopo.ok) {
+    return { ok: false, error: codigoDoEscopo(escopo), message: mensagemDoEscopo(escopo) };
+  }
+
   // Cria agent kind='mcp_agent' + v1 draft. Compensa rollback se versão falhar.
   const { data: agentRow, error: agentErr } = await admin
     .from("ai_agents")
@@ -712,9 +767,13 @@ export async function createMcpAgentAction(
     history_token_window: v.history_token_window,
     handoff_keywords: v.handoff_keywords,
     handoff_tool_enabled: v.handoff_tool_enabled,
+    handoff_legal_enabled: v.handoff_legal_enabled,
+    proposal_ai_draft_enabled: v.proposal_ai_draft_enabled,
     cases_enabled: v.cases_enabled,
     split_messages: v.split_messages,
     split_max_chars: v.split_max_chars,
+    inbound_debounce_ms: v.inbound_debounce_ms ?? null,
+    followup: v.followup,
     // O corpo ACEITAVA estes cinco e o INSERT os descartava: criar o assistente
     // pela tela com papel Operador, escopo de funil ou material marcado produzia
     // uma versão com tudo no default do banco — desligado e vazio.

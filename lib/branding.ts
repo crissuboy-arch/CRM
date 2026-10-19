@@ -25,6 +25,8 @@ export type Branding = {
   name: string;
   /** URL do logo, ou `null` quando a marca deve aparecer como texto. */
   logoUrl: string | null;
+  /** Arte opcional preparada para o tema escuro; ausente preserva o logo padrão. */
+  logoDarkUrl?: string | null;
   /** Primeira letra do nome — usada onde só cabe um caractere (sidebar recolhida). */
   initial: string;
 };
@@ -75,18 +77,30 @@ export function resolveBranding(
  * renderizava o nome em `<span>` e o cliente hidratava um `<img>`: troca de tipo
  * de elemento, React #418 em toda tela, árvore descartada e regerada.
  *
- * No SERVIDOR o comportamento é correto e é DELIBERADO: o texto sob o "Entrar"
- * sai daqui (o `.env`) enquanto o título da aba sai do banco, e
- * `tests/e2e/icone-da-marca.spec.ts:64-77` cruza as duas resoluções de propósito
- * — é o que faz "trocar o nome pela tela e a aba não acompanhar" reprovar. Por
- * isso o defeito se fecha tirando os client components daqui, e não mudando o
- * que esta função devolve.
+ * No SERVIDOR esta função continua lendo somente o `.env`. Páginas que precisam
+ * refletir a marca editada na tela devem usar `marcaDaSaida()` — por exemplo, o
+ * login, cujo texto precisa acompanhar o título da aba. Os demais call sites
+ * deste helper mantêm explicitamente o comportamento de fallback do ambiente.
  *
  * O ramo do navegador continua de pé porque a alternativa é pior: sem ele, um
  * client component que voltasse a chamar `branding()` cairia no padrão do
  * produto nos DOIS lados e mostraria a marca errada em SILÊNCIO. Divergir é
  * barulhento (o console acusa), e barulhento é o modo de falhar que se conserta.
  */
+/**
+ * A marca em vigor é a do PRODUTO — e é só então que o símbolo e o logotipo
+ * de `lib/branding/desenho.ts` podem aparecer.
+ *
+ * Duas condições, e as duas são necessárias: sem logo configurado E com o nome
+ * padrão. Quem só trocou o nome (para "Acme CRM") não pode receber um logotipo
+ * que soletra outro nome; quem só subiu um logo já tem o dele na tela. Trocar a
+ * cor de destaque não conta — a marca do produto continua sendo a que está
+ * escrita, só pintada de outro jeito.
+ */
+export function marcaEhADoProduto(marca: Pick<Branding, "name" | "logoUrl">): boolean {
+  return marca.logoUrl === null && marca.name === DEFAULT_APP_NAME;
+}
+
 export function branding(): Branding {
   if (typeof window !== "undefined") {
     const runtime = window.__PUBLIC_ENV__;

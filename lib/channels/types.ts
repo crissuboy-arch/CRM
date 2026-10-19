@@ -9,7 +9,24 @@ import type { OutboundMedia } from "@/lib/waha/media-send";
 
 export type { OutboundMedia };
 
-export type ChannelProvider = "waha" | "meta_cloud" | "zernio";
+export type ChannelProvider = "waha" | "meta_cloud" | "zernio" | "zernio_social" | "wacalls" | "datafy";
+
+/**
+ * Os providers que transportam MENSAGEM — o subconjunto sobre o qual a matriz
+ * de capabilities, os adapters e as fontes de template fazem sentido.
+ *
+ * `wacalls` (spec 18) mora em `channel_sessions` porque o que ele tem é
+ * exatamente o que aquela tabela modela — pareamento por QR, `status`,
+ * `archived_at`, jid, uma linha por organização — e porque `voice_calls` já
+ * aponta para ela. O que ele NÃO é: um canal por onde texto entra ou sai.
+ *
+ * Distinguir os dois no TIPO, e não numa condicional espalhada, é o que faz o
+ * compilador cobrar a decisão em cada lugar que perguntava "qual canal é este?"
+ * presumindo que a resposta sempre sabe mandar recado. Antes disto o CHECK do
+ * banco já aceitava `'wacalls'` enquanto este union não — e uma organização que
+ * pareasse voz derrubava `getAdapter` com `unknown_channel_provider`.
+ */
+export type ProviderDeMensagem = Exclude<ChannelProvider, "wacalls">;
 
 export interface ChannelCapabilities {
   /** Pode enviar texto livre a qualquer momento? false = exige template fora da janela. */
@@ -37,6 +54,8 @@ export interface ChannelCapabilities {
   groups: "full" | "limited" | "none";
   /** Mensagem entregue gera custo → decisões de envio precisam considerar orçamento. */
   costPerMessage: boolean;
+  /** O atendente pode editar e apagar para todos uma mensagem já enviada. */
+  alteraMensagemEnviada: boolean;
 }
 
 /**
@@ -69,6 +88,12 @@ export interface OutboundContact {
   phoneNumber: string;
   whatsappId: string;
   vcard: string;
+}
+
+/** Um grupo em que o número está. Só canais com capacidade `groups` diferente de "none". */
+export interface ChannelGroup {
+  chatId: string;
+  subject: string | null;
 }
 
 /**
@@ -142,6 +167,33 @@ export interface OutboundEnvelope extends ChannelTenantScope {
 }
 
 /**
+ * Uma conversão no vocabulário neutro que o canal traduz — ver
+ * `ChannelAdapter.reportConversion`. A venda (`Purchase`) e os eventos de ETAPA
+ * da Meta que o canal sabe repassar (`InitiateCheckout`, `LeadSubmitted`,
+ * `AddToCart`), que saem sem valor.
+ */
+export interface ChannelConversionInput extends ChannelTenantScope {
+  sessionRef: string;
+  /** Id da conversa NO provedor — o vínculo mais forte com o clique do anúncio. */
+  providerConversationId: string | null;
+  /** Só dígitos (E.164 sem `+`). Reforço de casamento, nunca o único. */
+  phone: string | null;
+  event: "Purchase" | "InitiateCheckout" | "LeadSubmitted" | "AddToCart";
+  /** Chave de deduplicação na plataforma: o mesmo id nunca conta duas vezes. */
+  eventId: string;
+  occurredAt: Date;
+  /** `null` no evento de etapa, que sai sem valor. */
+  valueCents: number | null;
+  currency: string;
+}
+
+/** O desfecho já classificado pelo canal, que é quem lê a resposta crua. */
+export type ChannelConversionResult =
+  | { outcome: "ok"; detail?: string }
+  | { outcome: "retry"; detail: string; retryInMs?: number }
+  | { outcome: "rejected"; detail: string };
+
+/**
  * O tradutor de formato de UM canal — e nada mais.
  *
  * Adapter NÃO decide se pode enviar: janela de 24h, cap diário, horário
@@ -201,6 +253,28 @@ export interface ChannelAdapter {
   echoExternalIds?(input: { externalId: string; recipient: string }): string[];
 
   /**
+   * A forma CANÔNICA de gravar `messages.external_id` de uma mensagem que este
+   * canal acabou de aceitar — a mesma que o `unique (organization_id,
+   * external_id)` usa para recusar a segunda linha.
+   *
+   * Existe porque a resposta de envio e o webhook do eco podem devolver PONTAS
+   * DIFERENTES do mesmo id (a cauda × o id completo, no WhatsApp). Gravar um
+   * lado numa forma e o outro noutra é o defeito da issue #196: os dois lados
+   * escrevem strings diferentes do mesmo identificador, o unique fica mudo e a
+   * janela entre o `SELECT` do dedup e o `INSERT` nasce a segunda linha com a
+   * mesma frase. Normalizar no PONTO DE ESCRITA fecha a janela sem migration e
+   * sem backfill — quem lê (`handleAck`, `echoExternalIds`) já procura as duas
+   * formas.
+   *
+   * É conhecimento do CANAL, não de quem envia — por isso mora aqui e não no
+   * handler, que é justamente o que o lint de canal impede.
+   *
+   * OPCIONAL: um canal cujo id já é único e simétrico não implementa, e quem
+   * chama grava o `externalId` exatamente como veio.
+   */
+  canonicalExternalId?(externalId: string): string;
+
+  /**
    * O telefone por trás de um identificador opaco, quando o canal souber.
    *
    * OPCIONAL: nem todo canal tem identidade opaca, e nem todo que tem sabe
@@ -213,6 +287,23 @@ export interface ChannelAdapter {
    */
   resolvePhoneForIdentity?(
     input: ChannelTenantScope & { sessionRef: string; identity: string },
+  ): Promise<string | null>;
+
+  /**
+   * O número, em dígitos, pelo qual este canal REGISTRA um telefone — `null`
+   * quando não souber, quando o número não existir ou quando só houver
+   * identidade opaca.
+   *
+   * Existe porque o cadastro guarda o celular brasileiro COM o nono dígito e o
+   * WhatsApp registra muito deles SEM. Quem precisa do endereço exato fora do
+   * envio de mensagem — a chamada de voz, que disca por dígitos e não pergunta
+   * nada a ninguém — pede aqui, testando a presença do método em vez de
+   * perguntar QUAL provider é.
+   *
+   * OPCIONAL: só implementa quem consegue perguntar à plataforma.
+   */
+  resolveRegisteredPhone?(
+    input: ChannelTenantScope & { sessionRef: string; phone: string },
   ): Promise<string | null>;
 
   /**
@@ -231,6 +322,22 @@ export interface ChannelAdapter {
   templates?: ChannelTemplateOps;
 
   /**
+   * Reporta uma venda à plataforma de anúncios PELO CANAL, quando o canal
+   * intermediado já tem a ponte configurada do lado dele (o conjunto de dados
+   * da plataforma ligado ao número, na tela do provedor).
+   *
+   * Existe porque, nesse arranjo, quem guarda o vínculo com o anúncio é o
+   * canal: o CRM não precisa de token nem de dataset próprios para a venda
+   * chegar. Quem chama (`lib/conversoes/`, via `conversao-pelo-canal.ts`) testa
+   * a presença do método em vez de perguntar QUAL provider é — o lint de canal
+   * proíbe o nome fora daqui.
+   *
+   * NUNCA lança: devolve o desfecho classificado. A diferença entre "tente de
+   * novo" e "precisa de gente" é do canal, que é quem lê a resposta crua.
+   */
+  reportConversion?(input: ChannelConversionInput): Promise<ChannelConversionResult>;
+
+  /**
    * Acende o "digitando…" na conversa do cliente.
    *
    * Existe porque o agente de IA responde no instante em que o modelo termina,
@@ -247,10 +354,42 @@ export interface ChannelAdapter {
    * LANÇA quando o transporte recusa, e é de propósito: a decisão de engolir é
    * de quem chama (o indicador é decoração; a mensagem é o produto), e engolir
    * aqui esconderia de todo chamador futuro que a chamada nem chega.
+   *
+   * `inboundExternalId` é o `messages.external_id` da última mensagem que o
+   * cliente mandou nesta conversa, ou `null` quando não há. Há canal que não
+   * acende presença por conversa, e sim "respondendo a esta mensagem" — o
+   * oficial é assim, e sem o id ele não tem o que sinalizar. Quem não precisa
+   * ignora o campo.
    */
   signalTyping?(input: ChannelTenantScope & {
     sessionRef: string;
     recipient: string;
+    inboundExternalId: string | null;
+  }): Promise<void>;
+
+  /**
+   * Troca o texto de uma mensagem que o próprio atendente já enviou.
+   *
+   * `externalId` é o que o CRM gravou (`messages.external_id`); `recipient` é o
+   * endereço de `resolveRecipient`, ou `null` quando não há. Como o canal monta
+   * o id completo a partir dos dois é conhecimento dele, não da rota. Lança
+   * `recipient_unavailable` quando não dá para endereçar a mensagem.
+   *
+   * OPCIONAL como os demais: a tela pergunta `alteraMensagemEnviada` e a rota
+   * testa a presença do método em vez de perguntar QUAL provider é.
+   */
+  editMessage?(input: ChannelTenantScope & {
+    sessionRef: string;
+    recipient: string | null;
+    externalId: string;
+    text: string;
+  }): Promise<void>;
+
+  /** Apaga para todos uma mensagem enviada. Mesmo contrato de `editMessage`. */
+  revokeMessage?(input: ChannelTenantScope & {
+    sessionRef: string;
+    recipient: string | null;
+    externalId: string;
   }): Promise<void>;
 
   /**
@@ -272,6 +411,12 @@ export interface ChannelAdapter {
    * quem chama testa a presença em vez de perguntar QUAL provider é.
    */
   checkHealth?(input: ChannelTenantScope & { sessionRef: string }): Promise<ChannelHealth>;
+
+  /** Grupos do número. Ausente = o canal não lista grupos. */
+  listGroups?(input: { sessionRef: string }): Promise<ChannelGroup[]>;
+
+  /** Liga/desliga o recebimento de grupos na sessão; `true` só com a troca confirmada. */
+  setGroupIntake?(input: { sessionRef: string; receive: boolean }): Promise<boolean>;
 
   /**
    * Envia uma DEFINIÇÃO APROVADA — o único caminho de volta quando a janela de
@@ -374,9 +519,24 @@ export interface ChannelTemplateOps {
   update(input: ChannelTenantScope & {
     sessionRef: string;
     name: string;
+    /**
+     * OBRIGATÓRIO: com variantes de idioma, o PATCH por nome do provedor
+     * intermediado exige `language` no corpo (changelog de 28/08/2026) — sem ele
+     * a chamada falha, ou pior, edita a variante errada. Um modelo sem variantes
+     * aceita o idioma que ele tem, então mandar sempre é o caminho sem armadilha.
+     */
+    language: string;
     patch: Partial<Pick<ChannelTemplateDraft, "components" | "category">>;
   }): Promise<ChannelTemplate>;
+  /**
+   * ⚠️ `language` é OBRIGATÓRIO aqui por segurança, não por exigência da API:
+   * no provedor intermediado, DELETE por nome SEM idioma apaga TODAS as
+   * variantes (changelog de 28/08/2026). A assinatura obriga quem chama (a
+   * gestão de modelos da tela, `lib/channels/gestao-de-modelos.ts`) a dizer
+   * QUAL variante morre — apagar todas de uma vez é decisão que merece um
+   * método próprio, não um parâmetro esquecido.
+   */
   remove(
-    input: ChannelTenantScope & { sessionRef: string; name: string; language?: string },
+    input: ChannelTenantScope & { sessionRef: string; name: string; language: string },
   ): Promise<void>;
 }

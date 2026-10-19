@@ -14,24 +14,28 @@ import { connectWahaChannel, ChannelConnectionError } from "@/lib/channels/conne
 import { createAdminClient } from "@/lib/supabase/admin";
 import { mfaEmDivida } from "@/lib/auth/server";
 import { ok, fail } from "@/lib/api/wrappers";
-import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
-import { requireRole } from "@/lib/auth/require-role";
+import { loadAuthUser } from "@/lib/auth/server";
+import { orgAtivaDaApi, requireRole } from "@/lib/auth/require-role";
 import { ARCHIVED_AT, queryTolerantToMissingArchived } from "@/lib/channels/archived";
+import { PROVIDERS_DE_MENSAGEM } from "@/lib/channels/capabilities";
 import { createChannelSchema } from "@/lib/schemas/channels";
 import { createClient } from "@/lib/supabase/server";
 import { getWahaClient } from "@/lib/waha/client";
 import { traduzir } from "@/lib/i18n/dicionario";
+import { traduzirLimiteDoPlano } from "@/lib/cobranca/limites";
 
 export const dynamic = "force-dynamic";
 
 export const CHANNEL_COLUMNS =
-  "id, waha_session_name, display_name, phone_number, status, status_reason, last_health_check_at, last_status_change_at, daily_message_limit, is_warmup_complete, created_at";
+  "id, provider, waha_session_name, display_name, phone_number, status, status_reason, last_health_check_at, last_status_change_at, daily_message_limit, is_warmup_complete, created_at, metadata";
 
 export async function GET(): Promise<Response> {
   const requestId = randomUUID();
   const user = await loadAuthUser();
   if (!user) return fail("unauthenticated", "Auth required.", 401, { requestId });
-  const activeOrg = await resolveActiveOrg(user);
+  const ativa = await orgAtivaDaApi(user, requestId);
+  if (!ativa.ok) return ativa.response;
+  const activeOrg = ativa.org;
   if (!activeOrg) return fail("forbidden_tenant", "Nenhuma organização ativa.", 403, { requestId });
 
   const supabase = await createClient();
@@ -39,7 +43,12 @@ export async function GET(): Promise<Response> {
     supabase
       .from("channel_sessions")
       .select(CHANNEL_COLUMNS)
-      .eq("organization_id", activeOrg.orgId);
+      .eq("organization_id", activeOrg.orgId)
+      // Só canal de MENSAGEM. A linha de chamada de voz (spec 18) mora na mesma
+      // tabela, tem card próprio em Conexões e não tem `waha_session_name` nem
+      // telefone: entrando aqui, ela vira um número a mais no seletor do inbox e
+      // na barra lateral — sem nome, sem estado vigiado e sem para onde mandar.
+      .in("provider", [...PROVIDERS_DE_MENSAGEM]);
   // Canais arquivados sobrevivem só como âncora das FKs RESTRICT
   // (conversations/messages). Para o usuário eles foram excluídos.
   //
@@ -54,10 +63,22 @@ export async function GET(): Promise<Response> {
   );
   if (error) return fail("internal_error", error.message, 500, { requestId });
 
-  return ok(data ?? [], {
+  return ok((data ?? []).map(semConfiguracaoInterna), {
     requestId,
     ...(schemaOutdated ? { meta: { schema_outdated: true } } : {}),
   });
+}
+
+/**
+ * Esta lista é de QUALQUER membro (seletor do inbox, barra lateral), e o
+ * `metadata` do canal guarda configuração que não é de todo mundo — a lista de
+ * números de teste da IA (`ai_test_phone_numbers`), que a própria rota
+ * `ai-access` só mostra a quem pode editá-la, e o que mais entrar ali depois.
+ * Daqui sai só o que a tela usa: `disabled` (o selo "Pausado", #2318).
+ */
+function semConfiguracaoInterna<T extends { metadata?: unknown }>(canal: T): T {
+  const m = canal.metadata as Record<string, unknown> | null | undefined;
+  return { ...canal, metadata: { disabled: m?.disabled === true } };
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
@@ -106,8 +127,12 @@ export async function POST(req: NextRequest): Promise<Response> {
     });
     return ok(result.channel, { requestId, status: result.replay ? 200 : 201 });
   } catch (error) {
+    const limite = traduzirLimiteDoPlano(error, authz.user.idioma);
+    if (limite) return fail(limite.code, limite.message, 409, { requestId, details: limite.details });
     if (error instanceof ChannelConnectionError) return fail(error.code,
-      error.code === "connection_in_progress" ? t("A conexão ainda está sendo preparada. Aguarde e tente novamente.") : t("Não foi possível concluir a conexão. Abra Conexões para tentar novamente ou reparar o número."),
+      error.code === "connection_in_progress" ? t("A conexão ainda está sendo preparada. Aguarde e tente novamente.")
+        : error.code === "connection_session_name_too_long" ? t("O identificador desta conexão passou do limite que o WhatsApp aceita. Nada foi criado no WhatsApp — atualize o sistema e tente novamente.")
+        : t("Não foi possível concluir a conexão. Abra Conexões para tentar novamente ou reparar o número."),
       error.status, { requestId, details: error.technical });
     return fail("internal_error", t("Não foi possível concluir a conexão. Tente novamente."), 500, { requestId });
   }

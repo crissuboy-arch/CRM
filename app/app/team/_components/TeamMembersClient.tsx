@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { useT } from "@/hooks/i18n/useT";
 import { useTeamMembers, type TeamMember } from "@/hooks/team/useTeamMembers";
 import { useChangeRole } from "@/hooks/team/useChangeRole";
+import { useReactivateMember } from "@/hooks/team/useReactivateMember";
 import { useRevokeMember } from "@/hooks/team/useRevokeMember";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,6 +42,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ROLES, type Role } from "@/lib/schemas/team";
+import { rotuloDoPapel } from "@/lib/auth/types";
 import { DotsThree } from "@/lib/ui/icons";
 
 interface Props {
@@ -54,6 +56,7 @@ export function TeamMembersClient({ currentUserId, canManage }: Props) {
   const { data, isLoading, isError } = useTeamMembers();
   const changeRole = useChangeRole();
   const revoke = useRevokeMember();
+  const reativar = useReactivateMember();
 
   const [interfaceMember, setInterfaceMember] = useState<TeamMember | null>(null);
   const [revokeDialog, setRevokeDialog] = useState<TeamMember | null>(null);
@@ -76,7 +79,7 @@ export function TeamMembersClient({ currentUserId, canManage }: Props) {
           <TableHeader>
             <TableRow>
               <TableHead>{t("Membro")}</TableHead>
-              <TableHead>Role</TableHead>
+              <TableHead>{t("Papel")}</TableHead>
               <TableHead>{t("Interface")}</TableHead>
               <TableHead>{t("Status")}</TableHead>
               <TableHead>{t("Última atividade")}</TableHead>
@@ -109,13 +112,13 @@ export function TeamMembersClient({ currentUserId, canManage }: Props) {
                       <SelectContent>
                         {ROLES.map((r) => (
                           <SelectItem key={r} value={r}>
-                            {r}
+                            {t(rotuloDoPapel(r))}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   ) : (
-                    <Badge variant="secondary">{m.role}</Badge>
+                    <Badge variant="secondary">{t(rotuloDoPapel(m.role))}</Badge>
                   )}
                 </TableCell>
                 <TableCell>
@@ -143,7 +146,16 @@ export function TeamMembersClient({ currentUserId, canManage }: Props) {
                   )}
                 </TableCell>
                 <TableCell>
-                  {m.accepted_at ? (
+                  {/*
+                    "Revogado" vem ANTES dos outros dois: quem foi revogado tem
+                    `accepted_at` preenchido (ele aceitou um dia), e sem esta
+                    ordem apareceria como "Aceito" — dizendo o contrário do que
+                    é. Até 2026-09-10 a linha nem chegava aqui: a rota filtrava
+                    revogado fora e a pessoa simplesmente sumia da equipe.
+                  */}
+                  {m.revoked_at ? (
+                    <Badge variant="destructive">{t("Revogado")}</Badge>
+                  ) : m.accepted_at ? (
                     <Badge variant="default">{t("Aceito")}</Badge>
                   ) : (
                     <Badge variant="outline">{t("Pendente")}</Badge>
@@ -164,12 +176,28 @@ export function TeamMembersClient({ currentUserId, canManage }: Props) {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          <DropdownMenuItem
-                            className="text-destructive focus:text-destructive"
-                            onClick={() => setRevokeDialog(m)}
-                          >
-                            {t("Revogar acesso")}
-                          </DropdownMenuItem>
+                          {/*
+                            Revogar e reativar são exclusivos: oferecer os dois
+                            na mesma linha convidaria ao clique errado. Sem o
+                            ramo de reativar, a única volta era emitir convite
+                            novo — caminho longo e cheio de beco, medido com
+                            uma pessoa de verdade presa nele em 2026-09-10.
+                          */}
+                          {m.revoked_at ? (
+                            <DropdownMenuItem
+                              disabled={reativar.isPending}
+                              onClick={() => void reativar.mutateAsync(m.user_id)}
+                            >
+                              {t("Devolver acesso")}
+                            </DropdownMenuItem>
+                          ) : (
+                            <DropdownMenuItem
+                              className="text-destructive focus:text-destructive"
+                              onClick={() => setRevokeDialog(m)}
+                            >
+                              {t("Revogar acesso")}
+                            </DropdownMenuItem>
+                          )}
                         </DropdownMenuContent>
                       </DropdownMenu>
                     ) : (

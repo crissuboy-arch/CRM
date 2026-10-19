@@ -2,14 +2,22 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { audit } from "@/lib/audit";
+import {
+  TETO_NOME_DE_SESSAO_WAHA, nomeDaSessaoCabeNoWaha, nomeDaSessaoNovo, podeRenomearSessaoDoWaha,
+} from "@/lib/channels/nome-da-sessao";
+import { lerGuardarHistorico } from "@/lib/channels/acervo-do-historico";
 import type { WahaClient } from "@/lib/waha/client";
 import { WahaSessionError } from "@/lib/waha/client";
+import { sincronizarRecebimentoDeGrupos } from "@/lib/grupos/sincronizar-filtro";
+import { lerLimiteEstourado } from "@/lib/cobranca/limites";
 
 const channelSchema = z.object({
   id: z.string().uuid(), organization_id: z.string().uuid(), waha_session_name: z.string(),
   status: z.enum(["STARTING", "SCAN_QR_CODE", "WORKING", "STOPPED", "FAILED"]),
   display_name: z.string().nullable().optional(), phone_number: z.string().nullable().optional(),
   status_reason: z.string().nullable().optional(), archived_at: z.string().nullable().optional(),
+  // A opção por conexão da #999 mora no `metadata` (jsonb, SEM migration).
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 const receiptSchema = z.object({
   replay: z.boolean(), channel: channelSchema.nullable(), receipt_id: z.string().uuid(), lease_token: z.string().uuid().optional(),
@@ -17,7 +25,8 @@ const receiptSchema = z.object({
 export class ChannelConnectionError extends Error {
   constructor(public readonly code: string, public readonly status: number, public readonly technical?: Record<string, unknown>) { super(code); }
 }
-type Transport = Pick<WahaClient, "createSession" | "startExistingSession" | "stopSession">;
+type Transport = Pick<WahaClient, "createSession" | "startExistingSession" | "stopSession">
+  & Partial<Pick<WahaClient, "definirRecebimentoDeGrupos">>;
 export interface ConnectChannelInput {
   organizationId: string; idempotencyKey: string; userId: string; requestId: string;
   displayName?: string; onboarding?: boolean; restart?: boolean;
@@ -35,6 +44,10 @@ export async function connectWahaChannel(authDb: SupabaseClient, serviceDb: Supa
     p_display_name: input.displayName ?? null, p_onboarding: input.onboarding ?? false,
   });
   if (error) {
+    // O gatilho de canais do plano (spec cobrança §5) recusa de dentro da
+    // reserva. Sobe CRU: a rota traduz para 409 com o número, e embrulhar aqui
+    // apagaria a mensagem que o carrega.
+    if (lerLimiteEstourado(error)) throw error;
     const code = ["idempotency_conflict", "connection_in_progress", "connection_mfa_required", "connection_forbidden"].find((c) => error.message.includes(c));
     throw new ChannelConnectionError(code ?? "connection_reservation_failed", error.code === "42501" ? 403 : code ? 409 : 500);
   }
@@ -52,9 +65,43 @@ export async function connectWahaChannel(authDb: SupabaseClient, serviceDb: Supa
     if (result.error) throw new ChannelConnectionError("connection_checkpoint_failed", 503);
     return result.data;
   }
+  // Teto do WAHA conferido AQUI, antes de qualquer chamada ao transporte.
+  //
+  // Deixar passar é o defeito da issue #667: o WAHA devolve um 400 opaco no
+  // meio do fluxo, com a reserva já feita, e o card de Conexões fica preso em
+  // `Parado`. Nome fora do teto não é falha de transporte — é dado de uma
+  // instalação cujo banco ainda não recebeu o backfill da 0232.
+  //
+  // O que dá para curar, é curado; o que não dá, para aqui. A fronteira é a
+  // da 0232 (`podeRenomearSessaoDoWaha`), e ela existe porque renomear um
+  // canal que já pareou o desliga do diretório de sessão do WAHA — o número
+  // some e só volta com QR novo. A reserva é fechada em `FAILED` para não
+  // travar a próxima tentativa.
+  if (!nomeDaSessaoCabeNoWaha(channel.waha_session_name)) {
+    if (!podeRenomearSessaoDoWaha(channel)) {
+      await finish("FAILED", "session_name_too_long");
+      throw new ChannelConnectionError("connection_session_name_too_long", 409, {
+        waha_session_name: channel.waha_session_name,
+        comprimento: channel.waha_session_name.length,
+        teto: TETO_NOME_DE_SESSAO_WAHA,
+      });
+    }
+    try {
+      channel.waha_session_name = await renomearSessaoParaOTeto(serviceDb, channel);
+    } catch (cause) {
+      await finish("FAILED", "session_name_too_long");
+      throw cause;
+    }
+  }
   try {
     if (input.restart) await waha.stopSession(channel.waha_session_name);
-    const creation = await waha.createSession(channel.waha_session_name);
+    // A opção por conexão decide o corpo da criação (desligada por padrão —
+    // decisão do mantenedor na #999). Com ela DESLIGADA a chamada continua
+    // sendo a de sempre, sem segundo argumento: o rastro não muda para quem
+    // não ligou nada.
+    const creation = lerGuardarHistorico(channel.metadata)
+      ? await waha.createSession(channel.waha_session_name, { guardarHistorico: true })
+      : await waha.createSession(channel.waha_session_name);
     created = creation.created;
     if (created) await finish("remote_created");
     const remote = await waha.startExistingSession(channel.waha_session_name);
@@ -65,6 +112,14 @@ export async function connectWahaChannel(authDb: SupabaseClient, serviceDb: Supa
     if (persisted.organization_id !== input.organizationId || persisted.id !== channel.id || persisted.status !== remote.status) {
       throw new Error("connection_checkpoint_mismatch");
     }
+    // Sessão (re)criada nasce ignorando grupos; reativar um canal arquivado mantém
+    // o mesmo id e as linhas LIGADAS de `channel_session_groups`. Ressincroniza o
+    // filtro com o banco (sem PUT quando já está certo). Nunca lança.
+    await sincronizarRecebimentoDeGrupos(
+      serviceDb,
+      waha.definirRecebimentoDeGrupos ? (ref, receber) => waha.definirRecebimentoDeGrupos!(ref, receber) : undefined,
+      { organizationId: input.organizationId, channelSessionId: channel.id, sessionRef: channel.waha_session_name },
+    );
     void audit({ action: channel.archived_at ? "channel.reactivated" : "channel.connected", actorUserId: input.userId,
       organizationId: input.organizationId, resourceType: "channel_session", resourceId: channel.id,
       requestId: input.requestId, metadata: { provider: "waha", origin: input.onboarding ? "onboarding" : "connections" } });
@@ -75,6 +130,35 @@ export async function connectWahaChannel(authDb: SupabaseClient, serviceDb: Supa
     throw new ChannelConnectionError(code, 502, cause instanceof WahaSessionError
       ? { operation: cause.operation, http_status: cause.httpStatus } : undefined);
   }
+}
+
+/**
+ * Troca o nome fora do teto por um `org_<8>_<32>`, e só quando é seguro.
+ *
+ * A guarda de `podeRenomearSessaoDoWaha` é repetida no WHERE de propósito: a
+ * decisão em memória parte de uma linha lida antes, e o que impede o UPDATE de
+ * alcançar um canal pareado precisa estar no próprio UPDATE. Nenhuma linha
+ * casada = ninguém renomeia e ninguém finge que renomeou.
+ */
+export async function renomearSessaoParaOTeto(
+  db: SupabaseClient,
+  canal: { id: string; organization_id: string; waha_session_name: string },
+): Promise<string> {
+  const novo = nomeDaSessaoNovo(canal.organization_id);
+  const { data, error } = await db.from("channel_sessions")
+    .update({ waha_session_name: novo })
+    .eq("organization_id", canal.organization_id).eq("id", canal.id)
+    .is("phone_number", null).neq("status", "WORKING")
+    .select("id").maybeSingle();
+  if (error || !data) {
+    throw new ChannelConnectionError("connection_session_name_too_long", 409, {
+      waha_session_name: canal.waha_session_name,
+      comprimento: canal.waha_session_name.length,
+      teto: TETO_NOME_DE_SESSAO_WAHA,
+      renomeio_recusado: true,
+    });
+  }
+  return novo;
 }
 
 /** Ações manuais aguardam apenas a reserva em execução; FAILED é recuperável. */

@@ -24,7 +24,7 @@ import { type NextRequest } from "next/server";
 import { ok, fail } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
 import { audit } from "@/lib/audit";
-import { encryptCpfSql, hashCpf } from "@/lib/contacts/cpf";
+import { camposCpfParaGravar } from "@/lib/contacts/cpf";
 import { traduzir } from "@/lib/i18n/dicionario";
 import {
   CSV_MAX_BYTES,
@@ -34,7 +34,8 @@ import {
   mapLinha,
   parseCsv,
 } from "@/lib/contacts/csv";
-import { contactCreateSchema, isValidCpf } from "@/lib/schemas";
+import { contactCreateSchemaDoPais } from "@/lib/schemas";
+import { perfilDaOrganizacao } from "@/lib/legal/perfil-do-pais";
 import { phoneLookupVariants } from "@/lib/channels/phone-variants";
 import { createClient } from "@/lib/supabase/server";
 
@@ -66,6 +67,13 @@ export async function POST(req: NextRequest): Promise<Response> {
   const user = authz.user;
   const orgId = authz.org.orgId;
   const t = (texto: string) => traduzir(texto, user.idioma);
+
+  // O documento do titular, na régua do PAÍS da organização (issue #1033): o
+  // cabeçalho aceito, a normalização do valor e a validação saem daqui. O país
+  // vem da coluna da organização — nunca do arquivo enviado.
+  const perfil = await perfilDaOrganizacao(supabase, orgId);
+  const doc = perfil.documento;
+  const schemaDoPais = contactCreateSchemaDoPais(perfil);
 
   let file: File;
   try {
@@ -116,7 +124,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     return fail("validation_failed", t("CSV vazio ou sem linhas de dados."), 422, { requestId });
   }
   const header = rows[0]!;
-  const mapeado = mapHeader(header, t);
+  const mapeado = mapHeader(header, t, doc);
   if (mapeado.motivo !== null) {
     return fail("validation_failed", `${t("Cabeçalho inválido:")} ${mapeado.motivo}.`, 422, {
       details: { header: header.join(", ") },
@@ -137,26 +145,23 @@ export async function POST(req: NextRequest): Promise<Response> {
 
   const candidatos: Array<{ linha: number; contato: Record<string, unknown> }> = [];
   const errors: LinhaErro[] = [];
-  const vistosNoArquivo = new Set<string>();
 
   for (let i = 0; i < dataRows.length; i++) {
     const linha = i + 2; // 1-based contando o cabeçalho — bate com o editor de planilhas.
-    const { contato, motivo } = mapLinha(dataRows[i]!, indices, t);
+    const { contato, motivo } = mapLinha(dataRows[i]!, indices, t, doc, perfil.telefoneExemplo);
     if (motivo !== null) {
       errors.push({ linha, motivo });
       continue;
     }
-    if (contato.cpf && !isValidCpf(contato.cpf)) {
-      errors.push({ linha, motivo: t("CPF inválido: ") + `"${contato.cpf}"` });
+    if (contato.cpf && !doc.valida(contato.cpf)) {
+      // O texto sai do PERFIL: no Brasil continua "CPF inválido: …" (a mesma
+      // chave do dicionário), e país sem checksum público diz na mensagem que a
+      // conferência é de FORMA — prometer dígito verificado que não existe é o
+      // que a issue #1033 proíbe.
+      errors.push({ linha, motivo: t(doc.mensagemInvalido + ": ") + `"${contato.cpf}"` });
       continue;
     }
-    const chave = contato.phone_number ?? `email:${(contato.email as string).toLowerCase()}`;
-    if (vistosNoArquivo.has(chave)) {
-      continue; // repetido DENTRO do arquivo — conta como duplicado, sem ruído de erro.
-    }
-    vistosNoArquivo.add(chave);
-
-    const parsed = contactCreateSchema.safeParse({ ...contato, source: SOURCE_IMPORT_CSV });
+    const parsed = schemaDoPais.safeParse({ ...contato, source: SOURCE_IMPORT_CSV });
     if (!parsed.success) {
       const primeiro = parsed.error.issues[0];
       errors.push({ linha, motivo: primeiro?.message ?? t("dados inválidos") });
@@ -218,6 +223,9 @@ export async function POST(req: NextRequest): Promise<Response> {
   for (const { linha, contato } of candidatos) {
     const phone = contato.phone_number as string | undefined;
     const email = contato.email as string | undefined;
+    // Só contatos existentes ou gravados com sucesso reservam identificadores.
+    // Cada repetição chega aqui para ter desfecho; uma linha inválida ou que
+    // falhou no insert não pode descartar outra válida do mesmo arquivo.
     if (
       (phone && phoneLookupVariants(phone).some((v) => existentes.has(`tel:${v}`))) ||
       (email && existentes.has(`email:${email.toLowerCase()}`))
@@ -240,11 +248,11 @@ export async function POST(req: NextRequest): Promise<Response> {
       consent: {},
     };
     if (contato.cpf) {
-      insertRow.cpf_hash = hashCpf(contato.cpf as string);
-      // LGPD: além do hash (dedupe), grava a versão cifrada — igual ao create
-      // unitário, senão o contato importado nasce sem CPF recuperável.
-      const enc = await encryptCpfSql(supabase, contato.cpf as string);
-      if (enc) insertRow.cpf_encrypted = enc;
+      // LGPD: hash (dedupe) e versão cifrada nascem JUNTOS — o CHECK
+      // `contacts_cpf_consistency` recusa a linha se só um dos dois existir
+      // (#2522). Sem cifra disponível a linha segue SEM CPF, em vez de voltar
+      // em `errors` e parar a reimportação inteira.
+      Object.assign(insertRow, await camposCpfParaGravar(supabase, contato.cpf as string));
     }
 
     const { data: criado, error: insErr } = await supabase

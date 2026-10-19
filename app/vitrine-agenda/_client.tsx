@@ -152,7 +152,7 @@ export function VitrineDaAgenda() {
                     "rounded-sm px-2.5 py-1 text-xs transition-colors duration-fast ease-out",
                     "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-500",
                     visao === v.id
-                      ? "bg-accent font-semibold text-accent-fg"
+                      ? "bg-accent font-semibold text-accent-foreground"
                       : "text-text-muted hover:bg-surface-elevated hover:text-text",
                   )}
                 >
@@ -171,6 +171,11 @@ export function VitrineDaAgenda() {
           visao={visao}
           ancora={ANCORA}
           agora={ANCORA}
+          // VITRINE DE DEMONSTRAÇÃO: não há organização por trás destes dados
+          // de mentira, então não há fuso de organização a respeitar. O fuso
+          // resolvido do próprio navegador deixa o desenho exatamente onde
+          // estava — e é o correto para quem olha a vitrine do próprio aparelho.
+          fuso={Intl.DateTimeFormat().resolvedOptions().timeZone}
           pessoas={PESSOAS}
           agendamentos={visiveis}
           className="h-[560px]"
@@ -214,6 +219,7 @@ export function VitrineDaAgenda() {
           agendamentos={AGENDAMENTOS}
           pessoas={PESSOAS}
           agora={ANCORA}
+          fuso={Intl.DateTimeFormat().resolvedOptions().timeZone}
           className="h-[420px]"
         />
       </Secao>

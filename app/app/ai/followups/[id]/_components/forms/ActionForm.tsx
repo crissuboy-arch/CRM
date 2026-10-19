@@ -2,11 +2,14 @@
 
 import { useState } from "react";
 
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -14,6 +17,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { actionConfigSchema } from "@/lib/followup/graph-schema";
 import { MODOS_DA_ACAO, opcoes, type ModoDaAcao } from "@/lib/followup/vocabulario";
 import { useMessageTemplates } from "@/hooks/inbox/useMessageTemplates";
+import { useModelosAprovadosDoFluxo } from "@/hooks/followup/useModelosAprovadosDoFluxo";
 import { useT } from "@/hooks/i18n/useT";
 
 import type { ConfigOf } from "./shared";
@@ -23,55 +27,111 @@ import type { ConfigOf } from "./shared";
  * mão. Trata os três estados em vez de fingir que a lista sempre chega:
  * carregando, vazia e erro — porque um seletor vazio sem explicação é o mesmo
  * beco sem saída que o campo de UUID era, só que mais bonito.
+ *
+ * Duas origens, em grupos separados: os textos prontos (Ajustes → Modelos) e os
+ * modelos APROVADOS no WhatsApp. A diferença não é cosmética: com a janela de
+ * 24 h fechada, só o aprovado chega ao cliente — por isso o plano B da mensagem
+ * por IA (`soAprovados`) só oferece esse grupo.
  */
 function SeletorDeModelo({
   id,
   valor,
   onChange,
   permiteVazio,
+  soAprovados,
 }: {
   id: string;
   valor: string;
   onChange: (templateId: string) => void;
   permiteVazio: boolean;
+  soAprovados: boolean;
 }) {
   const t = useT();
-  const { data: modelos, isLoading, isError } = useMessageTemplates();
+  const textos = useMessageTemplates();
+  const aprovados = useModelosAprovadosDoFluxo();
+  const prontos = soAprovados ? [] : (textos.data ?? []);
+  const doCanal = aprovados.data ?? [];
 
-  if (isLoading) return <p className="text-xs text-text-muted">{t("Carregando seus modelos…")}</p>;
-  if (isError) {
+  // Seguimento do #3056: o id gravado que não está em nenhuma das listas (fluxo
+  // importado de outra conta, modelo apagado) deixava o seletor EM BRANCO, sem
+  // dizer nada. Só afirma a ausência com as duas listas carregadas — lista que
+  // falhou ou não pôde ser lida não prova que o modelo sumiu. Indisponível, o
+  // `value` vai "" — é o que faz o Radix mostrar o placeholder «Escolha um modelo».
+  const listasLidas = (soAprovados || textos.isSuccess) && aprovados.isSuccess;
+  const indisponivel = listasLidas && valor !== "" && !prontos.some((m) => m.id === valor) && !doCanal.some((m) => m.id === valor);
+  const aviso = indisponivel && (
+    <p role="alert" className="text-xs text-warning-fg">
+      {t("O modelo que estava aqui não está disponível nesta conta. Escolha um modelo para este passo.")}
+    </p>
+  );
+
+  if ((!soAprovados && textos.isLoading) || aprovados.isLoading) {
+    return <p className="text-xs text-text-muted">{t("Carregando seus modelos…")}</p>;
+  }
+  if ((soAprovados || textos.isError) && aprovados.isError) {
     return (
       <p className="text-xs text-error-fg">
         {t("Não consegui carregar seus modelos de mensagem. Recarregue a página.")}
       </p>
     );
   }
-  if (!modelos?.length) {
+  // O plano B é OPCIONAL: sem modelo aprovado, o seletor continua de pé com
+  // "Nenhum" e diz o que falta — trocá-lo por uma frase faria o campo sumir da
+  // tela justamente para quem ainda não tem modelo, e nada explicaria onde ele foi.
+  if (!soAprovados && prontos.length === 0 && doCanal.length === 0) {
     return (
-      <p className="text-xs text-text-muted">
-        {t("Você ainda não tem modelos de mensagem. Crie um em Ajustes → Modelos e ele aparece aqui.")}
-      </p>
+      <div className="space-y-2">
+        {aviso}
+        <p className="text-xs text-text-muted">
+          {t("Você ainda não tem modelos de mensagem. Crie um em Ajustes → Modelos e ele aparece aqui.")}
+        </p>
+      </div>
     );
   }
 
   const SEM_MODELO = "__nenhum__";
+  const escolhido = doCanal.find((m) => m.id === valor);
   return (
-    <Select
-      value={valor === "" ? SEM_MODELO : valor}
-      onValueChange={(v) => onChange(v === SEM_MODELO ? "" : v)}
-    >
-      <SelectTrigger id={id}>
-        <SelectValue placeholder={t("Escolha um modelo")} />
-      </SelectTrigger>
-      <SelectContent>
-        {permiteVazio && <SelectItem value={SEM_MODELO}>{t("Nenhum")}</SelectItem>}
-        {modelos.map((m) => (
-          <SelectItem key={m.id} value={m.id}>
-            {m.title}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <div className="space-y-2">
+      <Select
+        value={indisponivel ? "" : valor === "" ? SEM_MODELO : valor}
+        onValueChange={(v) => onChange(v === SEM_MODELO ? "" : v)}
+      >
+        <SelectTrigger id={id}>
+          <SelectValue placeholder={t("Escolha um modelo")} />
+        </SelectTrigger>
+        <SelectContent>
+          {permiteVazio && <SelectItem value={SEM_MODELO}>{t("Nenhum")}</SelectItem>}
+          {prontos.length > 0 && (
+            <SelectGroup>
+              <SelectLabel>{t("Textos prontos")}</SelectLabel>
+              {prontos.map((m) => (
+                <SelectItem key={m.id} value={m.id}>
+                  {m.title}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          )}
+          {doCanal.length > 0 && (
+            <SelectGroup>
+              <SelectLabel>{t("Aprovados no WhatsApp")}</SelectLabel>
+              {doCanal.map((m) => (
+                <SelectItem key={m.id} value={m.id}>
+                  {m.name} ({m.language})
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          )}
+        </SelectContent>
+      </Select>
+      {aviso}
+      {escolhido && <p className="whitespace-pre-line text-xs text-text-muted">{escolhido.texto}</p>}
+      {soAprovados && doCanal.length === 0 && (
+        <p className="text-xs text-text-muted">
+          {t("Nenhum modelo aprovado no WhatsApp ainda. Crie um em Conexões → Modelos e ele aparece aqui quando for aprovado.")}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -90,18 +150,28 @@ export function ActionForm({
     config.mode === "ai_message" ? (config.fallback_template_id ?? "") : "",
   );
   const [templateId, setTemplateId] = useState(config.mode === "template" ? config.template_id : "");
+  // #2734 — mídia OPCIONAL do passo: com uma imagem ou PDF, o texto acima vira a
+  // LEGENDA. O upload pela tela ainda não existe nesta fatia — o campo é a URL.
+  const [mediaUrl, setMediaUrl] = useState(
+    config.mode === "text" ? (config.media_url ?? "") : "",
+  );
   const [error, setError] = useState<string | null>(null);
 
   const commit = (next: {
     mode: ModoDaAcao;
     body: string;
+    mediaUrl: string;
     promptHint: string;
     fallbackTemplateId: string;
     templateId: string;
   }) => {
     const candidate =
       next.mode === "text"
-        ? { mode: "text" as const, body: next.body }
+        ? {
+            mode: "text" as const,
+            body: next.body,
+            ...(next.mediaUrl.trim() ? { media_url: next.mediaUrl.trim() } : {}),
+          }
         : next.mode === "ai_message"
           ? {
               mode: "ai_message" as const,
@@ -118,7 +188,7 @@ export function ActionForm({
     onChange(parsed.data);
   };
 
-  const fields = { body, promptHint, fallbackTemplateId, templateId };
+  const fields = { body, mediaUrl, promptHint, fallbackTemplateId, templateId };
 
   return (
     <div className="space-y-3">
@@ -158,8 +228,25 @@ export function ActionForm({
             }}
           />
           <p className="text-xs text-text-muted">
-            {t("Sai exatamente assim, sem IA. No laço,")} {t("{{volta}}")} e {t("{{voltas}}")} {t("viram o número da volta.")}
+            {t("Sai exatamente assim, sem IA. No laço,")} {t("{{volta}}")} {t("e")} {t("{{voltas}}")} {t("viram o número da volta.")}
           </p>
+          <div className="space-y-2">
+            <Label htmlFor="action-media-url">{t("Imagem ou PDF (opcional)")}</Label>
+            <Input
+              id="action-media-url"
+              type="url"
+              maxLength={2000}
+              value={mediaUrl}
+              placeholder="https://…/oferta.pdf"
+              onChange={(e) => {
+                setMediaUrl(e.target.value);
+                commit({ mode, ...fields, mediaUrl: e.target.value });
+              }}
+            />
+            <p className="text-xs text-text-muted">
+              {t("Com uma imagem ou PDF, o texto acima vira a legenda do arquivo. Outros tipos de arquivo são recusados. Depois de 24 horas sem resposta do cliente, a mídia não sai — só um modelo aprovado chega até ele.")}
+            </p>
+          </div>
         </div>
       ) : mode === "ai_message" ? (
         <>
@@ -176,11 +263,14 @@ export function ActionForm({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="action-fallback">{t("Se a IA não conseguir escrever, mandar este modelo")}</Label>
+            <Label htmlFor="action-fallback">
+              {t("Se a janela de 24 horas já tiver fechado, mandar este modelo aprovado no lugar da IA")}
+            </Label>
             <SeletorDeModelo
               id="action-fallback"
               valor={fallbackTemplateId}
               permiteVazio
+              soAprovados
               onChange={(v) => {
                 setFallbackTemplateId(v);
                 commit({ mode, ...fields, fallbackTemplateId: v });
@@ -195,11 +285,15 @@ export function ActionForm({
             id="action-template-id"
             valor={templateId}
             permiteVazio={false}
+            soAprovados={false}
             onChange={(v) => {
               setTemplateId(v);
               commit({ mode, ...fields, templateId: v });
             }}
           />
+          <p className="text-xs text-text-muted">
+            {t("Depois de 24 horas sem resposta do cliente, só um modelo aprovado no WhatsApp chega até ele.")}
+          </p>
         </div>
       )}
       {error && <p className="text-xs text-error-fg">{error}</p>}

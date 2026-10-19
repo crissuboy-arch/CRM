@@ -16,6 +16,7 @@ import {
   type AgentInboxItem,
 } from "@/hooks/ai/useAgentInbox";
 import { kindLabel, SEVERITY_LABEL, type AgentInboxSeverity } from "@/lib/ai/agent-inbox-copy";
+import { linkDePagamentoSeguro } from "@/lib/cobranca/link";
 import { Bell, Check } from "@/lib/ui/icons";
 import { useT } from "@/hooks/i18n/useT";
 import { ApiError } from "@/lib/api/types";
@@ -89,6 +90,12 @@ export function AgentInboxList({ canResolve }: { canResolve: boolean }) {
           </p>
         </div>
       ) : (
+        <>
+        {tab === "open" ? (
+          <p className="-mb-2 text-xs text-muted-foreground">
+            {t("Os mais graves primeiro; entre iguais, os mais recentes.")}
+          </p>
+        ) : null}
         <ul className="divide-y divide-border rounded-lg border border-border">
           {data.items.map((item) => (
             <InboxRow
@@ -100,6 +107,7 @@ export function AgentInboxList({ canResolve }: { canResolve: boolean }) {
             />
           ))}
         </ul>
+        </>
       )}
     </div>
   );
@@ -147,6 +155,13 @@ function InboxRow({
         {item.destination.estado === "disponivel" ? (
           <Button asChild size="sm" variant="link" className="mt-1 h-auto whitespace-normal px-0 text-left">
             <Link href={item.destination.href}>{t(item.destination.rotulo)}</Link>
+          </Button>
+        ) : null}
+        {linkDePagamentoSeguro(item.link_de_pagamento) ? (
+          <Button asChild size="sm" className="ml-3 mt-1">
+            <a href={linkDePagamentoSeguro(item.link_de_pagamento) ?? undefined} target="_blank" rel="noopener noreferrer">
+              {t("Pagar agora")}
+            </a>
           </Button>
         ) : null}
       </div>
