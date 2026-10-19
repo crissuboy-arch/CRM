@@ -1,8 +1,8 @@
 {
-  "name": "deskcomm-crm",
+  "name": "nexora-crm",
   "version": "0.1.0",
   "private": true,
-  "description": "NEXORA CRM ? AI-Powered CRM",
+  "description": "NEXORA CRM — AI-Powered CRM",
   "engines": {
     "node": ">=22"
   },

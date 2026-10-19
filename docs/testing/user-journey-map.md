@@ -1,6 +1,6 @@
 # Mapa de Jornadas & Testes E2E — Experiência do usuário em VPS fresca
 
-> Fonte da verdade do QA de produto do DeskcommCRM open-source. Cada caso aqui é
+> Fonte da verdade do QA de produto do NEXORA open-source. Cada caso aqui é
 > exercitado **pelo frontend real** (Playwright), com contas de teste reais e
 > recursos reais (banco fresco do `baseline.sql`, WAHA local, receiver de webhook
 > real). Curl/API só como diagnóstico, nunca como prova de UX.
@@ -1107,7 +1107,7 @@ GitHub dispara no horário é do GitHub.
 **Por que P0:** achado pelo dono do produto num número que é também o WhatsApp
 pessoal/comercial dele — a IA respondeu automaticamente para cliente atual, dono
 de incorporadora, contato pessoal, fornecedor e conversa antiga. O
-DeskcommCRM responde `allow by default` (publicou agente para a sessão → atende
+NEXORA responde `allow by default` (publicou agente para a sessão → atende
 todo inbound); num número compartilhado com gente isso é a IA assumindo conversa
 que não era dela.
 

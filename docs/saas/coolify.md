@@ -1,4 +1,4 @@
-# Instalar o DeskcommCRM numa VPS com Coolify
+# Instalar o NEXORA numa VPS com Coolify
 
 Este guia é para quem tem uma VPS (testado na HostGator) e quer usar o **Coolify** nela. No
 fim, o CRM **e o banco de dados dele** estarão rodando na mesma VPS, atrás do proxy do
@@ -377,7 +377,7 @@ Não tire print nem grave a tela.** Eles também ficam guardados em
 ## Passo 6 — Conferir que está no ar
 
 Abra `https://crm.SEUDOMINIO.com.br/login` no navegador e entre com o usuário e a senha do
-Passo 5. Na primeira entrada aparece o assistente "Boas-vindas ao DeskcommCRM", com seis
+Passo 5. Na primeira entrada aparece o assistente "Boas-vindas ao NEXORA", com seis
 passos; dá para pular os que você não quiser fazer agora (medido em 14/10/2026). O endereço
 sem `/login` abre a página inicial pública do sistema.
 

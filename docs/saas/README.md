@@ -1,6 +1,6 @@
-# O seu SaaS com o DeskcommCRM
+# O seu SaaS com o NEXORA
 
-Este é o caminho de quem quer **revender o DeskcommCRM como produto próprio**: uma instalação
+Este é o caminho de quem quer **revender o NEXORA como produto próprio**: uma instalação
 numa VPS sua, várias empresas-clientes dentro dela, cada uma pagando um plano, com a sua marca.
 A licença MIT permite hospedar para terceiros, revender e cobrar o que quiser, sem royalty.
 

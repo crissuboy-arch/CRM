@@ -19,7 +19,7 @@ primeiro login feito.
    caminho do arquivo onde elas ficam guardadas.
 5. **Conferir por fora** (Passo 6): `curl -sSI https://SEU_DOMINIO/app | head -1` dá `307`.
    Explique por que é `/app`: a raiz é uma página pública e dá `200`.
-6. **O primeiro login** e o assistente "Boas-vindas ao DeskcommCRM", que dá para pular por
+6. **O primeiro login** e o assistente "Boas-vindas ao NEXORA", que dá para pular por
    enquanto.
 
 ## O erro que vale mostrar

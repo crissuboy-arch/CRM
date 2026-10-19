@@ -1,6 +1,6 @@
 # Cobrar os seus clientes
 
-Com a **Stripe** ou o **Asaas** conectados, o próprio DeskcommCRM cobra cada empresa-cliente,
+Com a **Stripe** ou o **Asaas** conectados, o próprio NEXORA cobra cada empresa-cliente,
 avisa quem atrasou, suspende quem não paga e libera quem pagou. A cobrança vem **desligada**
 em toda instalação: quem não revende nunca a vê.
 
@@ -19,7 +19,7 @@ e na [ADR-0004](../adr/0004-cobranca-do-revendedor.md).
 | Como o cliente paga | Cartão recorrente, cobrado sozinho todo mês. É o único meio testado no sistema. Não tem Pix | **Pix, boleto ou cartão**, escolhido na fatura a cada cobrança. Não é débito automático: o cliente paga cada fatura |
 | O que o cliente informa | Os dados do cartão, na página da Stripe | O **CPF ou CNPJ** de quem paga, antes de assinar. Vai direto para o Asaas e não fica guardado no sistema |
 | Trocar cartão e ver faturas | Botão **Gerenciar pagamento** (portal da Stripe) | Não há portal: o cliente abre a fatura de cada mês |
-| Nota fiscal | O DeskcommCRM não emite | O DeskcommCRM não emite; a emissão, se você quiser, é no painel do Asaas |
+| Nota fiscal | O NEXORA não emite | O NEXORA não emite; a emissão, se você quiser, é no painel do Asaas |
 | Preço mínimo do plano | R$ 5,00 | R$ 5,00 |
 
 Vende para pequena empresa brasileira que paga no Pix ou no boleto? **Asaas.** Cliente que
@@ -236,7 +236,7 @@ suspensas por falta de pagamento (a tela mostra quantas). Nada é cancelado no p
 
 ## Nota fiscal
 
-O DeskcommCRM **não emite nota fiscal**, com nenhum dos dois provedores. Emitir é obrigação
+O NEXORA **não emite nota fiscal**, com nenhum dos dois provedores. Emitir é obrigação
 sua, como prestador do serviço. O Asaas oferece emissão de nota de serviço na conta dele;
 confira com o seu contador antes de ligar.
 

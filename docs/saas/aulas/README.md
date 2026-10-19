@@ -1,4 +1,4 @@
-# Roteiros de aula: o seu SaaS com o DeskcommCRM
+# Roteiros de aula: o seu SaaS com o NEXORA
 
 Cinco aulas, na ordem da [jornada do revendedor](../README.md). Cada roteiro diz o que a aula
 entrega, o que preparar antes de gravar, as cenas, o que mostrar na tela, o erro que vale a
