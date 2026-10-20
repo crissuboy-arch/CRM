@@ -583,6 +583,18 @@ const schema = z.object({
     .default("false")
     .transform((v) => v === "true"),
 
+  // Integração Athena (preparação — contrato em docs/integracao/athena.md).
+  // DESLIGADA por omissão: sem ATHENA_INTEGRATION_ENABLED="true" as rotas de
+  // /api/v1/integrations/athena/* respondem 404, como se não existissem.
+  // `z.string()` cru e normalização no leitor (lib/integrations/athena/config.ts),
+  // nunca enum: um valor digitado errado pelo operador lançaria no import e
+  // derrubaria o app inteiro — a mesma régua de SIGNUP_MODE/APP_ACCENT_HEX.
+  ATHENA_INTEGRATION_ENABLED: z.string().optional().default(""),
+  // Segredo HMAC partilhado com a Athena para os webhooks de entrada dela.
+  // Vazio (ou curto) = webhook desligado, fail-closed. Nunca é credencial de
+  // banco nem substitui o token de serviço `dsk_` por organização.
+  ATHENA_WEBHOOK_SECRET: z.string().optional().default(""),
+
   // App URLs
   NEXT_PUBLIC_APP_URL: z
     .string()

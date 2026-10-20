@@ -76,6 +76,18 @@ export const PUBLIC_PATHS: RegExp[] = [
   // volta do Google não tem, e não pode ter, o cookie.
   /^\/api\/v1\/plataformas-de-anuncio\/google\/callback$/,
   /^\/api\/v1\/integrations\/nuvemshop\/callback$/,
+  // Integração Athena (preparação, DESLIGADA por omissão — contrato em
+  // docs/integracao/athena.md). Quem chama é um serviço, sem cookie de
+  // sessão: a auth mora DENTRO de cada rota (Bearer `dsk_...` com o escopo
+  // athena:commands; no webhook, somado ao HMAC). Sem a flag
+  // ATHENA_INTEGRATION_ENABLED=true as rotas respondem 404. Ancorados com
+  // `$`, um por rota, de propósito — NADA de prefixo aberto sob
+  // /integrations/: a decisão humana (…/decision) NÃO está aqui, porque ela
+  // é só de sessão e o proxy tem de continuar a exigi-la.
+  /^\/api\/v1\/integrations\/athena\/health$/,
+  /^\/api\/v1\/integrations\/athena\/commands$/,
+  /^\/api\/v1\/integrations\/athena\/commands\/[0-9a-fA-F-]{36}$/,
+  /^\/api\/v1\/integrations\/athena\/webhook$/,
   /^\/api\/internal\//,
   /^\/api\/mcp(\/.*)?$/,
   // GET /api/v1/contacts aceita SESSÃO ou Bearer `dsk_...` (api_tokens) — a
