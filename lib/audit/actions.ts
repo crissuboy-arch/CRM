@@ -1177,16 +1177,16 @@ export const AUDIT_ACTIONS = [
   // interruptores, a antecedência e o opt-in de WhatsApp). O número NÃO entra:
   // é dado de contato, e o audit é trilha legível por quem administra.
   "user.task_reminder_prefs_updated",
-  // Integração Athena (preparação, desligada por omissão — contrato em
-  // docs/integracao/athena.md). O comando recebido NUNCA executa na chegada:
-  // nasce pendente de aprovação humana, e aprovar/rejeitar são atos de uma
-  // pessoa com sessão, registados aqui. O metadata traz o nome do comando e
-  // o estado — nunca os parâmetros, que podem carregar dado de cliente.
+  // Integração Athena (desligada por omissão — contrato oficial v1). A ação
+  // pedida NUNCA executa na chegada: nasce pendente de aprovação humana, e
+  // aprovar/rejeitar são atos de uma pessoa com sessão, registados aqui. Os
+  // nomes mantêm o vocabulário `command_*` que o contrato fixa para a
+  // auditoria, mesmo com as rotas renomeadas para `actions`. O metadata
+  // traz o tipo da ação e o estado — nunca os parâmetros, que podem
+  // carregar dado de cliente.
   "athena.command_received",
   "athena.command_approved",
   "athena.command_rejected",
-  "athena.webhook_received",
-  "athena.webhook_invalid_signature",
 ] as const;
 
 /** Um código de auditoria. Derivado de `AUDIT_ACTIONS` — não redigite a lista. */
