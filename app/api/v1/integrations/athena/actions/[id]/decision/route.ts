@@ -1,6 +1,6 @@
 /**
- * POST /api/v1/integrations/athena/commands/[id]/decision — a decisão
- * HUMANA sobre um comando que a Athena pediu.
+ * POST /api/v1/integrations/athena/actions/[id]/decision — a decisão
+ * HUMANA sobre uma ação que a Athena pediu.
  *
  * Só sessão, só admin da organização, com a guarda de escrita de suporte.
  * Um token de serviço NUNCA decide: esta rota nem sequer está em
@@ -8,9 +8,17 @@
  * e o `requireRole` confirma o papel. É este o gate que separa "a Athena
  * pede" de "um humano autorizou".
  *
- * Aprovar NÃO executa o comando nesta fase — regista a decisão
- * (`approved`), auditada. O executor é uma fase futura, autorizada à
- * parte. Contrato: `docs/integracao/athena.md`.
+ * Aprovar NÃO executa a ação nesta fase — regista a decisão (`approved`),
+ * auditada. O executor é uma fase futura, autorizada à parte.
+ *
+ * A auditoria aqui é AGUARDADA (`await`), ao contrário do padrão
+ * fire-and-forget da casa: a rota `…/approval` lê a evidência dessa mesma
+ * auditoria, e a decisão só pode responder "gravado" quando a evidência já
+ * existe para ser lida. O `audit()` da casa nunca lança — captura os
+ * próprios erros —, por isso aguardar não transforma uma falha de auditoria
+ * num 500 da decisão.
+ *
+ * Contrato: `docs/integracao/athena.md` (§3.7).
  */
 import { randomUUID } from "node:crypto";
 
@@ -21,9 +29,9 @@ import { audit } from "@/lib/audit";
 import { fail, ok } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
 import { requireSupportWrite } from "@/lib/impersonate/support";
+import { decidirAcaoAthena } from "@/lib/integrations/athena/acoes";
 import { athenaIntegrationEnabled } from "@/lib/integrations/athena/config";
 import { decisaoAthenaSchema } from "@/lib/integrations/athena/contrato";
-import { decidirJobAthena } from "@/lib/integrations/athena/jobs";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
@@ -38,7 +46,7 @@ export async function POST(
     return fail("not_found", "Integração Athena desligada.", 404, { requestId });
   }
 
-  const authz = await requireRole("admin", { requestId, resource: "athena_commands" });
+  const authz = await requireRole("admin", { requestId, resource: "athena_actions" });
   if (!authz.ok) return authz.response;
 
   const supportDenied = await requireSupportWrite(authz.org.orgId);
@@ -46,7 +54,7 @@ export async function POST(
 
   const { id } = await params;
   if (!z.string().uuid().safeParse(id).success) {
-    return fail("not_found", "Job não encontrado.", 404, { requestId });
+    return fail("not_found", "Ação não encontrada.", 404, { requestId });
   }
 
   const raw = await req.json().catch(() => null);
@@ -59,37 +67,44 @@ export async function POST(
   }
 
   try {
-    const desfecho = await decidirJobAthena(createAdminClient(), {
+    const desfecho = await decidirAcaoAthena(createAdminClient(), {
       organizationId: authz.org.orgId,
-      jobId: id,
+      actionId: id,
       decision: parsed.data.decision,
       decidedByUserId: authz.user.id,
+      decidedByRole: authz.org.role,
       note: parsed.data.note,
     });
 
     if (desfecho.tipo === "not_found") {
-      return fail("not_found", "Job não encontrado.", 404, { requestId });
+      return fail("not_found", "Ação não encontrada.", 404, { requestId });
     }
     if (desfecho.tipo === "already_decided") {
-      return fail("conflict", "Este comando já foi decidido.", 409, {
+      return fail("conflict", "Esta ação já foi decidida.", 409, {
         requestId,
-        details: { state: desfecho.job.state },
+        details: { state: desfecho.acao.state },
       });
     }
 
-    void audit({
+    // Aguardado de propósito (ver o cabeçalho): a evidência tem de existir
+    // antes de a decisão responder, porque é ela que a rota de approval lê.
+    await audit({
       action:
         parsed.data.decision === "approve" ? "athena.command_approved" : "athena.command_rejected",
       actorUserId: authz.user.id,
       organizationId: authz.org.orgId,
-      resourceType: "athena_command",
+      resourceType: "athena_action",
       resourceId: id,
       requestId,
-      metadata: { decision: parsed.data.decision, state: desfecho.job.state },
+      metadata: {
+        decision: parsed.data.decision,
+        state: desfecho.acao.state,
+        decided_by_role: authz.org.role,
+      },
     });
 
-    return ok({ job_id: id, state: desfecho.job.state }, { requestId });
+    return ok({ action_id: id, state: desfecho.acao.state }, { requestId });
   } catch {
-    return fail("internal_error", "Erro ao decidir o comando.", 500, { requestId });
+    return fail("internal_error", "Erro ao decidir a ação.", 500, { requestId });
   }
 }

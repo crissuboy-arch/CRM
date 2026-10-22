@@ -1,30 +1,38 @@
 /**
- * GET /api/v1/integrations/athena/health — a sonda do contrato Athena (v1).
+ * GET /api/v1/integrations/athena/health — a sonda do contrato oficial
+ * Athena ↔ NEXORA (v1).
  *
- * Responde sempre, ligada ou desligada: é assim que a Athena (ou um humano
- * a depurar) distingue "a integração está desligada" de "o endereço está
- * errado". Não exige auth e não revela nada da instalação — só o estado
- * da flag, a versão do contrato e o catálogo de comandos. Os comandos e
- * os webhooks, esses sim, respondem 404 enquanto a integração estiver
- * desligada. Contrato: `docs/integracao/athena.md`.
+ * Responde SEMPRE, ligada ou desligada: é assim que a Athena Control (ou um
+ * humano a depurar) distingue "a integração está desligada" de "o endereço
+ * está errado". Sem autenticação, sem acesso a dados, sem efeitos
+ * colaterais — e em JSON PLANO, no formato que a Control já consome dos
+ * outros produtos (sem o envelope `data` das rotas de ações).
+ *
+ * Contrato: `docs/integracao/athena.md` (§3.1).
  */
 import { randomUUID } from "node:crypto";
 
-import { ok } from "@/lib/api/wrappers";
-import { athenaIntegrationEnabled } from "@/lib/integrations/athena/config";
-import { COMANDOS_ATHENA } from "@/lib/integrations/athena/contrato";
+import {
+  ATHENA_CONTRACT_VERSION,
+  ATHENA_VERSAO_DO_PRODUTO,
+  athenaIntegrationEnabled,
+} from "@/lib/integrations/athena/config";
+import { respostaPlana } from "@/lib/integrations/athena/respostas";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(): Promise<Response> {
   const requestId = randomUUID();
-  return ok(
+  return respostaPlana(
     {
-      service: "athena-integration",
-      version: "v1",
+      platform: "NEXORA CRM",
+      status: "operational",
+      version: ATHENA_VERSAO_DO_PRODUTO,
+      contract: ATHENA_CONTRACT_VERSION,
+      capabilities: ["integrations:health"],
       enabled: athenaIntegrationEnabled(),
-      commands: [...COMANDOS_ATHENA],
+      timestamp: new Date().toISOString(),
     },
-    { requestId },
+    requestId,
   );
 }
