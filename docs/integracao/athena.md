@@ -1,224 +1,567 @@
-# Integração Athena — contrato v1 (preparação)
+# ATHENA ↔ NEXORA CRM — Contrato Oficial de Integração
 
-**Estado: PREPARAÇÃO. A integração está DESLIGADA por omissão e nenhuma
-execução autónoma existe.** Este documento é o contrato entre o CRM e a
-Athena: define como ela poderá *pedir* ações e *avisar* de eventos quando
-a integração for ligada, numa fase futura e com autorização própria.
-Ligar a flag não executa nada — só abre os endpoints de registo e de
-decisão descritos abaixo.
+| | |
+|---|---|
+| **Produto** | NEXORA CRM |
+| **Consumidor** | Athena (via Athena Control) |
+| **Versão do contrato** | `v1` (primeira versão oficial neste padrão) |
+| **Estado** | **IMPLEMENTADO no código nesta branch; NÃO está no ar em nenhum ambiente; ligar exige deploy autorizado + registo na Athena Control** |
+| **Data** | 2026-10-22 |
+| **Base URL** | `https://<instalação-do-nexora>` (ex.: a URL do staging/produção da instalação) |
 
-## Princípios
+> **Sentido da integração (decisão arquitetural):** a **Athena consome APIs HTTPS
+> autenticadas do NEXORA**, no mesmo padrão já usado pela Athena Control com a
+> VitrinePro e pelo adapter editorial com o TrendHub USA. O NEXORA **não** chama a
+> Athena, **não** recebe webhooks da Athena e **não** fala com o Cris OS.
+>
+> **Estado real:** este contrato está **implementado no código** desta branch
+> (rotas em `app/api/v1/integrations/athena/`, biblioteca em
+> `lib/integrations/athena/`). **Não está no ar em nenhum ambiente**: nenhum
+> deploy foi feito e a integração continua **desligada por omissão**
+> (`ATHENA_INTEGRATION_ENABLED` ≠ `true` → os endpoints autenticados respondem
+> `404`). Ligar exige, por esta ordem: deploy autorizado desta branch,
+> emissão de uma credencial por organização e registo na Athena Control
+> (secção 10). Nada aqui é uma integração simulada apresentada como real.
 
-1. **A Athena pede; um humano decide.** Todo o comando recebido vira um
-   job em `pending_approval`. Nenhum comando executa na chegada, e nesta
-   fase nem a aprovação executa — ela regista a decisão. O executor (a
-   peça que transformaria `approved` em efeito) é uma fase separada, com
-   autorização separada.
-2. **A organização vem da credencial, nunca do pedido.** O token de
-   serviço pertence a uma organização; `organization_id` é resolvido da
-   linha do token. Um `organization_id` no corpo é ignorado por desenho —
-   os esquemas nem o aceitam como fonte.
-3. **Desligado é invisível.** Sem `ATHENA_INTEGRATION_ENABLED=true`, os
-   endpoints de comandos e de webhook respondem `404`, como se não
-   existissem. Só o health check responde sempre, para se poder distinguir
-   "desligado" de "endereço errado".
-4. **Fail-closed em tudo.** Sem segredo de webhook, o webhook é `404`.
-   Assinatura inválida é `401`. Token sem o escopo é `403`.
+---
 
-## Endpoints
+## 1. Princípios
 
-Base: `/api/v1/integrations/athena` (versão no caminho; uma v2 futura
-viveria ao lado, sem quebrar esta).
+1. **A Athena pede; um humano decide; executar é outra fase.** Solicitar uma ação
+   regista um pedido em `pending_approval`. Nada executa na chegada. Aprovar
+   regista a decisão — também não executa (o executor, se um dia for autorizado,
+   é uma fase separada, com autorização separada e testes próprios).
+2. **A organização vem da credencial, nunca do pedido.** Cada credencial pertence
+   a uma organização do NEXORA. Um `organization_id` no corpo é ignorado por
+   desenho — os esquemas nem o aceitam como fonte.
+3. **Desligado é invisível.** Sem a integração ligada para a organização, os
+   endpoints autenticados respondem `404`, como se não existissem. Só o *health*
+   responde sempre, para distinguir "desligado" de "endereço errado".
+4. **Fail-closed em tudo.** Sem credencial → `401`. Credencial sem o escopo →
+   `403`. Ação de outra organização → `404` (indistinto de inexistente).
+5. **Só agregados saem.** Estatísticas são contagens e totais da organização da
+   credencial — nunca registos individuais de clientes, conversas ou leads.
+6. **Segredo nunca no frontend, nunca em URL.** A credencial só viaja no header
+   `Authorization`. O plaintext é mostrado uma única vez, na emissão.
 
-| Método e caminho | Quem chama | Auth | Resposta quando desligada |
-| --- | --- | --- | --- |
-| `GET /health` | qualquer sonda | nenhuma | `200` com `enabled: false` |
-| `POST /commands` | Athena | Bearer `dsk_...` (escopo `athena:commands`) ou sessão | `404` |
-| `GET /commands/{job_id}` | Athena | idem | `404` |
-| `POST /commands/{job_id}/decision` | **só um humano** | sessão + papel `admin` | `404` |
-| `POST /webhook` | Athena | Bearer (escopo) **e** HMAC | `404` |
+---
 
-### Health
+## 2. Autenticação e escopos
 
-```json
-{ "data": { "service": "athena-integration", "version": "v1",
-            "enabled": false,
-            "commands": ["contacts.create", "messages.send",
-                         "appointments.create", "reports.generate"] } }
+### 2.1 A credencial
+
+- **Formato:** token opaco `dsk_<prefixo-8-hex>_<segredo-32-bytes-base64url>` —
+  a mesma infraestrutura de tokens de API que o NEXORA já usa para o MCP
+  (`api_tokens`).
+- **Emissão:** um administrador da organização emite a credencial em
+  *Configurações → Tokens de API* (ou `POST /api/v1/settings/api-tokens`,
+  sessão admin). O plaintext aparece **uma vez**; deve ser colado de imediato no
+  cofre da Athena Control (secção 9) — nunca enviado por chat nem guardado em
+  texto simples.
+- **Armazenamento no NEXORA:** apenas `prefix` + **hash SHA-256** do plaintext.
+  Não existe forma de recuperar o plaintext a partir do NEXORA.
+- **Uma credencial por organização.** Se a Athena servir várias organizações do
+  mesmo NEXORA, regista uma credencial por organização no cofre, cada uma com os
+  seus escopos. Não existe credencial "de plataforma" neste contrato.
+- **Expiração:** opcional, definida na emissão (1–365 dias). Credencial expirada
+  → `401 token_expired`.
+- **Revogação:** imediata, pelo administrador da organização (*Tokens de API →
+  Revogar*). Credencial revogada → `401 token_invalid` no pedido seguinte.
+  Revogar desliga a Athena **daquela organização, e só dela**.
+- **Rotação:** emitir uma credencial nova (mesmos escopos), registá-la no cofre
+  da Control, confirmar com uma chamada ao *health* autenticado ou às
+  *capabilities*, e revogar a antiga.
+- **Limites herdados da casa:** teto de credenciais ativas por organização
+  (imposto pelo banco) e tetos de escrita por recurso aplicados às ações
+  (secção 8).
+
+### 2.2 Escopos (lista fechada)
+
+| Escopo | Dá acesso a |
+|---|---|
+| `athena:stats` | `GET /stats` — estatísticas agregadas da organização |
+| `athena:capabilities` | `GET /capabilities` — capacidades e catálogo de ações da organização |
+| `athena:actions` | `POST /actions`, `GET /actions/{id}`, `GET /actions/{id}/approval` — pedir ações e consultar os **seus** pedidos e a evidência de aprovação |
+
+O *health* é público (sem escopo), como nos precedentes. Escopo em falta →
+`403 forbidden` com `required_scope` no corpo do erro. A decisão humana sobre
+uma ação **não** é um escopo: nenhuma credencial pode decidir (secção 6).
+
+### 2.3 Cabeçalhos
+
+```http
+Authorization: Bearer dsk_<prefixo>_<segredo>
+Idempotency-Key: <uuid>            # obrigatório em POST /actions (secção 5)
+Content-Type: application/json
 ```
 
-Não revela nada da instalação: nem organização, nem contagens, nem
-versões internas.
+---
 
-### Criar um comando — `POST /commands`
+## 3. Endpoints
 
-Corpo:
+Base de todos os caminhos: **`/api/v1/integrations/athena`**
+
+| # | Método e caminho | Auth | Estado |
+|---|---|---|---|
+| 3.1 | `GET /health` | nenhuma | implementado — payload plano alinhado à Control |
+| 3.2 | `GET /stats` | Bearer · `athena:stats` | implementado |
+| 3.3 | `GET /capabilities` | Bearer · `athena:capabilities` | implementado |
+| 3.4 | `POST /actions` | Bearer · `athena:actions` | implementado (era `POST /commands` na preparação v1 — ver secção 11) |
+| 3.5 | `GET /actions/{action_id}` | Bearer · `athena:actions` | implementado (era `GET /commands/{id}` na preparação v1) |
+| 3.6 | `GET /actions/{action_id}/approval` | Bearer · `athena:actions` | implementado |
+| 3.7 | `POST /actions/{action_id}/decision` | **só sessão humana** (admin da organização) | implementado (era `.../commands/{id}/decision` na preparação v1) |
+
+**Convenções de formato** (iguais às dos precedentes, para a Control consumir sem
+casos especiais):
+
+- *Health*, *stats* e *capabilities* respondem **JSON plano** (sem envelope), no
+  formato que a Athena Control já consome da VitrinePro.
+- As rotas de *ações* usam o envelope padrão da API versionada do NEXORA:
+  sucesso `{ "data": …, "request_id": "…" }`; erro
+  `{ "error": { "code", "message", "request_id" } }`.
+- Todas as respostas levam `X-Request-Id` e `Cache-Control: no-store`.
+- JSON em `snake_case`; datas ISO-8601 em UTC; IDs são UUID.
+
+### 3.1 Health — `GET /api/v1/integrations/athena/health`
+
+Sonda de conectividade e de estado. Sem autenticação, sem acesso a dados, sem
+efeitos colaterais. Responde sempre — mesmo com a integração desligada
+(`enabled: false`).
+
+**Resposta `200`:**
 
 ```json
-{ "command": "messages.send",
+{
+  "platform": "NEXORA CRM",
+  "status": "operational",
+  "version": "0.1.0",
+  "contract": "v1",
+  "capabilities": ["integrations:health"],
+  "enabled": true,
+  "timestamp": "2026-10-22T09:00:00.000Z"
+}
+```
+
+| Campo | Significado |
+|---|---|
+| `platform` | Nome do produto (`NEXORA CRM`) |
+| `status` | `operational` · `degraded` |
+| `version` | Versão da instalação do NEXORA |
+| `contract` | Versão deste contrato (`v1`) |
+| `capabilities` | Capacidades públicas ativas nesta fase (só leitura) |
+| `enabled` | A integração está ligada nesta instalação (a ativação por organização confirma-se nas *capabilities*, com credencial) |
+| `timestamp` | Instante da resposta (UTC) |
+
+Não revela organizações, contagens nem versões internas além das acima.
+
+### 3.2 Estatísticas — `GET /api/v1/integrations/athena/stats`
+
+Agregados **da organização da credencial**, reutilizando as agregações que o
+painel do NEXORA já calcula (funil, canais, atendimento). Só contagens — nenhum
+registo individual sai por esta rota.
+
+**Pedido:**
+
+```http
+GET /api/v1/integrations/athena/stats
+Authorization: Bearer dsk_…
+```
+
+**Resposta `200`:**
+
+```json
+{
+  "platform": "NEXORA CRM",
+  "contract": "v1",
+  "organization": { "id": "3f6b…", "name": "Empresa Exemplo" },
+  "conversations": { "open": 12, "in_progress": 5, "closed_30d": 148 },
+  "leads": { "total": 320, "new_30d": 41 },
+  "contacts": { "total": 512 },
+  "agents": { "configured": 2, "active": 1, "runs_30d": 96 },
+  "support": { "cases_open": 3 },
+  "generated_at": "2026-10-22T09:00:00.000Z",
+  "timestamp": "2026-10-22T09:00:00.000Z"
+}
+```
+
+> Os grupos e campos exatos são fechados na implementação a partir das
+> agregações reais do painel (funil/canais/atendimento) — o contrato fixa a
+> forma (grupos de contagens + `generated_at`), não promete métricas que o
+> produto ainda não calcule.
+
+**Erros:** `401` sem credencial válida · `403` sem o escopo `athena:stats` ·
+`404` com a integração desligada · `429` acima do limite (secção 8).
+
+### 3.3 Capacidades — `GET /api/v1/integrations/athena/capabilities`
+
+O que a Athena pode pedir **nesta organização**: catálogo de ações, estados
+suportados e configuração resumida do agente. É a rota que a Athena consulta
+antes de propor qualquer ação.
+
+**Resposta `200`:**
+
+```json
+{
+  "platform": "NEXORA CRM",
+  "contract": "v1",
+  "organization": { "id": "3f6b…", "name": "Empresa Exemplo" },
+  "integration": { "enabled": true },
+  "actions": [
+    { "type": "contacts.create",     "sensitive": true, "requires_approval": true },
+    { "type": "messages.send",       "sensitive": true, "requires_approval": true },
+    { "type": "appointments.create", "sensitive": true, "requires_approval": true },
+    { "type": "reports.generate",    "sensitive": true, "requires_approval": true }
+  ],
+  "action_states": ["pending_approval", "approved", "rejected"],
+  "agent": { "configured": true, "active": true },
+  "timestamp": "2026-10-22T09:00:00.000Z"
+}
+```
+
+**Erros:** `401` · `403` (escopo `athena:capabilities`) · `404` desligada.
+
+### 3.4 Solicitar uma ação — `POST /api/v1/integrations/athena/actions`
+
+Regista um pedido de ação. **Não executa nada** — o pedido nasce em
+`pending_approval` à espera da decisão humana (secção 6).
+
+**Pedido:**
+
+```http
+POST /api/v1/integrations/athena/actions
+Authorization: Bearer dsk_…
+Idempotency-Key: 9b1d…(uuid)
+Content-Type: application/json
+
+{
+  "type": "messages.send",
   "params": { "conversation_id": "…", "text": "…" },
-  "reason": "o lead pediu uma proposta" }
+  "reason": "o lead pediu uma proposta"
+}
 ```
 
-- `command` é um enum fechado (o catálogo abaixo). Fora da lista → `422`.
-- `params` é um objeto livre por comando; `reason` (≤ 500 caracteres) é o
-  porquê, mostrado a quem aprova.
-- Sucesso → `201` com `{ "job_id": "…", "command": "…", "state":
-  "pending_approval" }`. **Nada foi executado.**
+| Campo | Regras |
+|---|---|
+| `type` | Enum fechado — o catálogo da secção 7. Fora da lista → `422`. |
+| `params` | Objeto próprio de cada tipo de ação. |
+| `reason` | Opcional, ≤ 500 caracteres. É o porquê mostrado a quem aprova. |
+| `organization_id` | **Não é aceite como fonte** — a organização é a da credencial. |
 
-### Consultar um job — `GET /commands/{job_id}`
-
-Devolve o job (`state`: `pending_approval` | `approved` | `rejected`,
-quem decidiu e quando). Um job de outra organização responde `404` —
-o id não é um canal para sondar o que é dos outros.
-
-### A decisão humana — `POST /commands/{job_id}/decision`
+**Resposta `201`:**
 
 ```json
-{ "decision": "approve", "note": "pode enviar" }
+{
+  "data": {
+    "action_id": "7c2e…",
+    "type": "messages.send",
+    "state": "pending_approval",
+    "created_at": "2026-10-22T09:01:00.000Z"
+  },
+  "request_id": "…"
+}
 ```
 
-- Só sessão, só `admin` da organização do job, com a guarda de escrita
-  de suporte. A rota nem está nos caminhos públicos: o proxy exige
-  sessão, e um token de serviço não tem como decidir — quem pede nunca
-  aprova o próprio pedido.
-- Decidir um job já decidido → `409 conflict` com o estado atual.
-- Aprovar **regista** a decisão; não executa o comando (ver Princípios).
+**Erros:** `400` `Idempotency-Key` em falta ou não-UUID · `401` · `403` (escopo
+ou teto de escrita) · `404` desligada · `409 idempotency_conflict` /
+`idempotency_in_progress` (secção 5) · `422 validation_failed` (tipo fora do
+catálogo ou `params` inválidos) · `429`.
 
-### Webhook de entrada — `POST /webhook`
+### 3.5 Consultar o estado de uma ação — `GET /api/v1/integrations/athena/actions/{action_id}`
 
-A Athena avisa de eventos dela (ex.: `mission.completed`):
+**Resposta `200`:**
 
 ```json
-{ "event": "mission.completed", "data": { "mission_id": "…" } }
+{
+  "data": {
+    "action_id": "7c2e…",
+    "type": "messages.send",
+    "state": "approved",
+    "reason": "o lead pediu uma proposta",
+    "created_at": "2026-10-22T09:01:00.000Z",
+    "decided_at": "2026-10-22T09:05:31.000Z"
+  },
+  "request_id": "…"
+}
 ```
 
-O aviso vira um evento `athena.webhook_received` no `event_log` da
-organização do token. Nenhum handler o consome nesta fase.
+Uma ação de outra organização responde `404` — o ID não é um canal para sondar
+o que é dos outros. Os `params` **não** são devolvidos a quem pede (podem conter
+dados de clientes); a evidência da decisão vem da rota 3.6.
 
-## Autenticação serviço-a-serviço
+### 3.6 Evidência de aprovação humana — `GET /api/v1/integrations/athena/actions/{action_id}/approval`
 
-- **Token por organização**: um token `dsk_...` de *Configurações →
-  Tokens de API* (a mesma infraestrutura do MCP), guardado como hash
-  SHA-256, com o escopo **`athena:commands`** nos `scopes` do token.
-  Revogar o token desliga a Athena daquela organização, e só dela.
-- Não há segredo de serviço global: um segredo em variável de ambiente
-  identificaria "a Athena", mas não *de que organização* é o pedido —
-  e aceitar a organização do corpo violaria o Princípio 2.
-- O token herda os limites da casa: teto de escrita por recurso
-  (`athena_commands` / `athena_webhooks`) e expiração opcional.
-- Erros: sem token ou token inválido → `401 token_invalid`; token sem o
-  escopo → `403 forbidden` com `required_scope: athena:commands`.
+Devolve o recibo verificável da decisão humana: quem decidiu, quando, com que
+papel, e a referência que a Athena apresenta na Control. É o equivalente, neste
+produto, ao `approvalRef` do padrão TrendHub — com uma diferença de natureza:
+lá a evidência é um ficheiro versionado no repositório do produto (um produto de
+conteúdo em git); aqui é o **registo de auditoria** do NEXORA, verificável por
+esta rota com a credencial.
 
-## Webhooks assinados (HMAC)
+**Resposta `200` (ação já decidida):**
 
-- Segredo partilhado em `ATHENA_WEBHOOK_SECRET` (mínimo de 32
-  caracteres; vazio ou curto = webhook desligado, `404`).
-- Assinatura: `HMAC-SHA256(segredo, corpo cru)` em hex, no cabeçalho
-  `x-athena-signature` (aceita-se o prefixo `sha256=`).
-- A comparação é em tempo constante e hasheia os dois lados antes de
-  comparar (não vaza nem o comprimento). Verifica-se sobre o corpo
-  **cru**, antes de qualquer parse de JSON.
-- Assinatura inválida → `401 invalid_signature` **e** uma entrada de
-  auditoria `athena.webhook_invalid_signature`.
+```json
+{
+  "data": {
+    "action_id": "7c2e…",
+    "state": "approved",
+    "approval_ref": "nexora://actions/7c2e…/approval",
+    "decision": "approve",
+    "decided_by": { "user_id": "a1b2…", "role": "admin" },
+    "decided_at": "2026-10-22T09:05:31.000Z",
+    "note": "pode enviar",
+    "audit": { "log_id": "e5f6…", "action": "athena.command_approved" }
+  },
+  "request_id": "…"
+}
+```
 
-## Comandos autorizados (catálogo v1)
+**Resposta `200` (ainda pendente):**
 
-| Comando | O que pediria (numa fase de execução) | Sensível |
-| --- | --- | --- |
-| `contacts.create` | criar um contato | sim |
+```json
+{
+  "data": {
+    "action_id": "7c2e…",
+    "state": "pending_approval",
+    "approval_ref": null,
+    "decision": null
+  },
+  "request_id": "…"
+}
+```
+
+A decisão, uma vez registada, é imutável neste contrato: não há rota para a
+alterar nem para a apagar. A trilha completa (pedido → decisão) fica no
+`api_audit_log` da organização.
+
+### 3.7 A decisão humana — `POST /api/v1/integrations/athena/actions/{action_id}/decision`
+
+**Não é uma rota da integração.** Existe para o humano decidir dentro do
+NEXORA e fica documentada aqui para o fluxo ser completo:
+
+- Só **sessão** de utilizador, só papel `admin` **da organização da ação**, com a
+  guarda de escrita de suporte da casa. A rota nem é pública para tokens: quem
+  pede nunca aprova o próprio pedido.
+- Corpo: `{ "decision": "approve" | "reject", "note": "…" }`.
+- Decidir uma ação já decidida → `409 conflict` com o estado atual
+  (compare-and-swap: duas decisões simultâneas não passam as duas).
+- Aprovar **regista** a decisão e emite a evidência (3.6). Não executa a ação.
+
+---
+
+## 4. Estados de uma ação
+
+```
+pending_approval ──► approved      (decisão humana: aprovar)
+                 └─► rejected      (decisão humana: rejeitar)
+```
+
+- `pending_approval` — pedido registado, ninguém decidiu.
+- `approved` — um admin da organização aprovou. **Terminal neste contrato.**
+- `rejected` — um admin rejeitou. Terminal.
+
+Não há caminho de volta de um estado terminal, nem de `approved` para execução
+neste contrato. Se uma fase futura de execução for autorizada, os estados
+`executing` / `executed` / `failed` serão acrescentados por uma nova versão
+deste contrato — nunca por alteração silenciosa desta.
+
+---
+
+## 5. Idempotência e proteção contra repetição
+
+`POST /actions` exige `Idempotency-Key: <uuid>` (sem chave ou não-UUID → `400`).
+A semântica é a do recibo de idempotência que o NEXORA já implementa:
+
+- **Mesma chave + mesmo corpo** → a resposta original (`201` com o mesmo
+  `action_id`), sem criar outro pedido. Repetir é seguro.
+- **Mesma chave + corpo diferente** → `409 idempotency_conflict`. Um pedido novo
+  usa uma chave nova.
+- **Mesma chave ainda em curso** → `409 idempotency_in_progress`; repetir dentro
+  de segundos, com a **mesma** chave.
+- **Unicidade:** por (organização, chave, endpoint). A chave é reservada
+  **antes** do efeito (reserva atómica no banco) — duas submissões simultâneas
+  com a mesma chave produzem exatamente um pedido.
+- **Janela:** o recibo vale **24 h**. Depois disso, a mesma chave é tratada
+  como um pedido novo.
+- **Retry após `500`:** repetir com a mesma chave é seguro por desenho.
+
+---
+
+## 6. Aprovações (resumo normativo)
+
+1. Todas as ações do catálogo são sensíveis e exigem aprovação humana — sem
+   exceções neste contrato.
+2. Quem aprova é um **admin da organização**, autenticado por **sessão** no
+   NEXORA. Nem a credencial da integração, nem a Athena, nem outro token podem
+   decidir.
+3. A evidência é o registo de auditoria + a rota 3.6 (`approval_ref`). A Athena
+   apresenta a `approval_ref` na Athena Control, como faz com o `approvalRef`
+   do TrendHub.
+4. **Solicitar ≠ aprovar ≠ executar.** Este contrato cobre solicitar, consultar
+   e provar a decisão. Executar está fora — deliberadamente.
+
+---
+
+## 7. Catálogo de ações (v1)
+
+| Tipo | O que pede | Sensível |
+|---|---|---|
+| `contacts.create` | criar um contacto | sim |
 | `messages.send` | enviar uma mensagem a um cliente | sim |
 | `appointments.create` | criar um agendamento | sim |
 | `reports.generate` | gerar um relatório | sim |
 
-Todos são sensíveis — mexem com clientes, mensagens ou agenda — e por
-isso **todos** passam pela aprovação humana. Acrescentar um comando é
-mudar o contrato: `lib/integrations/athena/contrato.ts` e este
-documento, na mesma alteração.
+Acrescentar um tipo é mudar o contrato (nova versão deste documento e do
+catálogo no código, na mesma alteração).
 
-Fora do catálogo, por desenho e sem exceção nesta fase: faturação,
-credenciais, apagar dados, alterar configurações da organização e
-qualquer ação em massa.
+**Fora do catálogo, por desenho e sem exceção:** faturação, credenciais,
+apagar dados, alterar configurações da organização e qualquer ação em massa.
 
-## Jobs e estados
+---
 
-Os jobs vivem no `event_log` (a fila canónica), sem tabela nova:
+## 8. Erros e retries
 
-- criar = emitir `athena.command_received` (`entity_kind:
-  "athena_command"`, `entity_id: job_id`) pela RPC `emit_event`, com
-  `payload.state = "pending_approval"` e os `params` no payload;
-- a transição grava `state`, `decided_by` e `decided_at` no payload,
-  com compare-and-swap sobre o payload lido: duas decisões simultâneas
-  não passam as duas;
-- o `status` do `event_log` fica `pending` e **nenhum handler está
-  registado** para este tipo de evento — o drain ignora-o. É deliberado:
-  neste desenho, nem um bug no pipeline de eventos executa um comando.
+Envelope de erro (rotas de ações): `{ "error": { "code", "message",
+"request_id" } }`. Nas rotas planas (health/stats/capabilities), o erro é
+`{ "error": "…" }` com o mesmo código HTTP, como nos precedentes.
 
-Transições possíveis: `pending_approval → approved` e
-`pending_approval → rejected`. Não há caminho de volta, nem de
-`approved` para execução nesta fase.
+| Código | HTTP | Significado | O que a Athena deve fazer |
+|---|---|---|---|
+| `bad_request` | 400 | `Idempotency-Key` em falta/não-UUID ou corpo ilegível | corrigir o pedido; não repetir igual |
+| `unauthorized` / `token_invalid` / `token_expired` | 401 | sem credencial, credencial inválida/revogada ou expirada | verificar a credencial no cofre; não repetir |
+| `forbidden` | 403 | credencial sem o escopo exigido (`required_scope` no corpo) ou teto de escrita excedido | pedir ao admin da organização uma credencial com o escopo; não repetir |
+| `not_found` | 404 | integração desligada **ou** ação inexistente/de outra organização (indistintos) | avisar um humano; não repetir às cegas |
+| `idempotency_conflict` | 409 | mesma chave, corpo diferente | chave nova para um pedido novo |
+| `idempotency_in_progress` | 409 | mesma chave ainda em curso | esperar segundos e repetir com a mesma chave |
+| `conflict` | 409 | a ação já foi decidida | consultar o estado (3.5/3.6) |
+| `validation_failed` | 422 | tipo fora do catálogo ou `params` inválidos | corrigir contra este contrato; não repetir igual |
+| `rate_limited` | 429 | limite excedido | backoff exponencial a partir de `retry_after` / `Retry-After` |
+| `internal_error` | 500 | erro interno | repetir com a mesma `Idempotency-Key` é seguro |
 
-## Idempotência
+Rate limits: limites por IP e por credencial aplicam-se às rotas autenticadas
+(precedente VitrinePro: 60 pedidos/min no stats), somados aos tetos de escrita
+por recurso da infraestrutura de tokens.
 
-`Idempotency-Key: <uuid>` (opcional) em `POST /commands` e
-`POST /webhook`, com o recibo da casa (`lib/api/idempotency.ts`), por
-organização e endpoint, 24 h:
+---
 
-- mesma chave + mesmo corpo → a resposta original, sem criar outro job;
-- mesma chave + corpo diferente → `409 idempotency_conflict`;
-- mesma chave ainda em curso → `409 idempotency_in_progress` (repetir
-  dentro de instantes).
+## 9. Multiempresa
 
-Chave que não seja UUID → `400`.
+A integração é **por organização**, de ponta a ponta:
 
-## Auditoria
+| Peça | Como é por empresa |
+|---|---|
+| Credencial | Uma por organização, emitida pelo admin dela; a organização de qualquer pedido é a da credencial |
+| Agente de IA | O agente configurável da organização (`ai_agents` da própria organização) — as *capabilities* resumem o dela |
+| Conhecimento | As bases de conhecimento são da organização; nada deste contrato lê conhecimento de outra |
+| Conversas e leads | Isolados por `organization_id` (RLS + filtro por organização); as estatísticas são só da organização da credencial |
+| Permissões | Escopos por credencial + papéis humanos por organização (decisão = admin daquela organização) |
+| Histórico e auditoria | Pedidos registados no `event_log` e decisões gravadas na auditoria (`api_audit_log`), sempre filtrados por `organization_id`; nada cruza organizações |
 
-Entradas em `audit_log` (vocabulário em `lib/audit/actions.ts`):
-`athena.command_received`, `athena.command_approved`,
-`athena.command_rejected`, `athena.webhook_received`,
-`athena.webhook_invalid_signature`. O metadata traz o nome do comando, o
-estado e a decisão — **nunca** os `params`, que podem carregar dados de
-clientes.
+Nenhuma destas peças tem uma variante "global": não existe credencial de
+plataforma, agente partilhado nem leitura cruzada neste contrato. Servir
+outra organização é repetir o processo dela — credencial dela, agente dela,
+estatísticas dela.
 
-## Erros e retries
+---
 
-Envelope da casa: `{ "error": { "code", "message", "request_id" } }` nos
-falhos e `{ "data": …, "request_id" }` nos sucessos.
+## 10. O que a Athena precisa de fazer (lado do Cláudio)
 
-| Código | HTTP | O que a Athena deve fazer |
-| --- | --- | --- |
-| `not_found` | 404 | integração desligada ou job inexistente — **não** repetir às cegas; avisar um humano |
-| `unauthorized` / `token_invalid` / `token_expired` | 401 | renovar o token; não repetir |
-| `invalid_signature` | 401 | verificar o segredo e o corpo cru; não repetir |
-| `forbidden` | 403 | o token não tem o escopo ou excedeu o teto — não repetir |
-| `validation_failed` | 422 | corrigir o corpo contra este contrato; não repetir igual |
-| `idempotency_conflict` | 409 | usar uma chave nova para um pedido novo |
-| `idempotency_in_progress` | 409 | esperar alguns segundos e repetir com a **mesma** chave |
-| `conflict` | 409 | o job já foi decidido; consultar o estado |
-| `rate_limited` | 429 | backoff exponencial a partir de `retry_after` |
-| `internal_error` | 500 | repetir com a mesma `Idempotency-Key` é seguro |
+O lado do NEXORA está implementado. Para a integração existir de verdade,
+falta o lado da Athena — trabalho do Cláudio, no repositório da Athena, que
+este documento não altera:
 
-## Isolamento por tenant
+1. **Criar a integração na Athena Control** — uma integração `kind="api"`
+   para o NEXORA CRM, apontada à base URL da instalação, no mesmo padrão das
+   integrações já existentes (VitrinePro, TrendHub USA).
+2. **Guardar a credencial no cofre da Control** — o admin da organização
+   emite o token no NEXORA (*Configurações → Tokens de API*, com os escopos
+   `athena:stats`, `athena:capabilities` e `athena:actions` conforme o uso)
+   e um humano cola o plaintext — mostrado **uma única vez** na emissão —
+   diretamente no cofre da Control. Nunca por chat, nunca em texto simples,
+   nunca em variável partilhada entre organizações: uma credencial por
+   organização.
+3. **Registar `nexora_crm` em PROVIDERS** — o catálogo de providers da
+   Athena passa a conhecer o NEXORA como produto consumível por este
+   contrato.
+4. **Sonda de verificação contra o `GET /health`** — a Control valida a
+   integração chamando o health (público, JSON plano) e confirmando
+   `platform`, `contract: "v1"` e `enabled: true` depois de a flag ser
+   ligada na instalação; as *capabilities*, com a credencial, confirmam a
+   organização certa.
+5. **Ativar o adapter — só numa fase de execução autorizada.** O adapter
+   `nexora_crm` já existe reservado na Athena com `ESTADO="disabled"`.
+   Ligá-lo não faz parte deste contrato: solicitar ações e provar decisões
+   não é executar, e qualquer fase de execução exige autorização separada,
+   uma nova versão deste contrato com os estados de execução, e testes
+   próprios.
 
-Toda a leitura e escrita filtra por `organization_id` resolvida da
-credencial. Um job de outra organização é indistinguível de um
-inexistente (404 nos dois casos). A decisão filtra também por
-organização: um admin só decide jobs da sua.
+Enquanto estes passos não acontecerem, a integração está implementada e
+desligada — não está "meio ligada".
 
-## Configuração (operador)
+---
 
-| Variável | Efeito |
-| --- | --- |
-| `ATHENA_INTEGRATION_ENABLED` | só o valor exato `true` liga; qualquer outra coisa (incl. erro de digitação) é desligado |
-| `ATHENA_WEBHOOK_SECRET` | segredo HMAC ≥ 32 caracteres; vazio/curto desliga o webhook |
+## 11. Diferenças para a preparação v1
 
-E, por organização: um token `dsk_...` com o escopo `athena:commands`.
+A preparação v1 (o desenho anterior, nunca publicado em nenhum ambiente)
+foi substituída por este contrato oficial. As diferenças:
 
-## Limites conhecidos da v1
+- **`commands` → `actions`.** As rotas `POST /commands`,
+  `GET /commands/{id}` e `POST /commands/{id}/decision` chamam-se agora
+  `actions` (e a ação regista-se com `type`, não `command`). Custo zero: a
+  preparação nunca esteve no ar, por isso não há consumidor para partir.
+- **Escopos repartidos.** O escopo único `athena:commands` foi substituído
+  por três — `athena:stats`, `athena:capabilities`, `athena:actions` — para
+  uma credencial poder ler estatísticas sem poder pedir ações.
+- **Health alinhado ao formato plano da Control.** O health deixou o
+  envelope da casa e responde JSON plano (`platform`, `status`, `version`,
+  `contract`, `capabilities`, `enabled`, `timestamp`), como os produtos que
+  a Control já consome.
+- **`Idempotency-Key` passa a obrigatória** em `POST /actions` (na
+  preparação era opcional): sem chave ou não-UUID → `400 bad_request`.
+- **Nova rota de evidência de aprovação** — `GET /actions/{id}/approval`
+  (secção 3.6), que devolve a `approval_ref` e a referência do registo de
+  auditoria da decisão.
+- **REMOVIDOS: webhook + HMAC + `ATHENA_WEBHOOK_SECRET`.** A preparação
+  tinha uma porta de webhook assinado para a Athena avisar de eventos; o
+  padrão real, confirmado com os precedentes vivos, é o inverso — **a
+  Athena não envia webhooks a produtos**, é ela que consome as APIs deles.
+  A rota, a verificação de assinatura e a variável de ambiente saem.
+- **A decisão aguarda a gravação da auditoria.** Em `POST
+  /actions/{id}/decision`, o `audit()` é aguardado (`await`) em vez do
+  fire-and-forget habitual: a evidência tem de existir antes de a decisão
+  responder, porque é ela que a rota de approval lê.
 
-- A aprovação não executa: o estado `approved` é terminal nesta fase.
-- Não há listagem de jobs (só consulta por id) nem fila de aprovação na
-  UI — a decisão faz-se por API nesta fase.
-- O compare-and-swap da decisão compara o payload inteiro; payloads
-  grandes tornam a comparação mais pesada, o que é aceitável ao ritmo
-  humano de aprovações.
+---
+
+## 12. Testes
+
+A implementação é acompanhada de testes de rota (Vitest, ao lado de cada
+`route.ts` em `app/api/v1/integrations/athena/`) e de testes da biblioteca
+(`lib/integrations/athena/`). A lista exigida por este contrato:
+
+- **Autenticação e escopos** — sem credencial → `401`; credencial sem o
+  escopo da rota → `403` com `required_scope`; cada rota pede o seu escopo
+  (`athena:stats` / `athena:capabilities` / `athena:actions`).
+- **Revogação** — credencial revogada responde `401 token_invalid` no
+  pedido seguinte, só na organização dela.
+- **Isolamento multiempresa** — ação, estatísticas e capacidades são sempre
+  da organização da credencial; uma ação de outra organização responde
+  `404`, indistinto de inexistente.
+- **Idempotência e replay** — mesma chave + mesmo corpo devolve a resposta
+  original sem registar outra ação; mesma chave + corpo diferente → `409
+  idempotency_conflict`; sem chave ou não-UUID → `400 bad_request`.
+- **Aprovação e evidência** — toda a ação nasce `pending_approval`; só um
+  admin com sessão decide; a decisão fica provada em `GET
+  /actions/{id}/approval` com `approval_ref`, decisor, papel e referência
+  de auditoria; pendente responde `approval_ref: null`.
+- **Health no formato Control** — `200` sempre, JSON plano, `enabled` a
+  dizer a verdade da flag, desligada ou ligada.
+- **Erros** — os códigos e estados da secção 8, incluindo `429` com
+  `Retry-After` no limite do stats e `404` plano com a integração
+  desligada.
+
+Os resultados reais desta implementação (quantos testes, quantos verdes)
+vão no relatório da missão que a entregou — não neste documento, para o
+contrato não envelhecer com números de uma fotografia. Testes ao vivo
+contra uma instalação real dependem do staging: enquanto não houver deploy
+autorizado, "testado" significa a suite automatizada, e nada aqui apresenta
+simulação como real.
