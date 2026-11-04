@@ -59,6 +59,7 @@ import { FunisDoAgente, type CoberturaPorFunil } from "./FunisDoAgente";
 import { PublishConfirmDialog } from "./PublishConfirmDialog";
 import { ComandosDoCelular } from "./ComandosDoCelular";
 import { ServidorExternoNoAtendimento } from "./ServidorExternoNoAtendimento";
+import { ServidoresMcpDoAgente } from "./ServidoresMcpDoAgente";
 import {
   saveAgentDraftAction,
   publishAgentAction,
@@ -123,9 +124,14 @@ interface BaseProps {
    */
   provedoresOferecidos?: readonly string[];
   channelSessions: ChannelSessionLite[];
-  routerMembership?: { routerId: string; routerName: string } | null;
+  routerMembership?: { routerId: string; routerName: string; channelSessionId: string; channelStatus: string | null } | null;
   readOnly?: boolean;
   organizationTimezone?: string;
+  /**
+   * O módulo opcional `mcp_por_agente` (doc 252) está ligado nesta instalação.
+   * Ausente = desligado (falha fechada): a seção Servidores MCP não aparece.
+   */
+  mcpPorAgente?: boolean;
 }
 
 interface EditProps extends BaseProps {
@@ -200,7 +206,10 @@ interface FormState {
   split_max_chars: number;
   /** Janela de rajada (ms) do agente. `null` = usa a env da instalação. */
   inbound_debounce_ms: number | null;
+  reply_min_interval_ms: number | null;
   followup: FollowupValue;
+  voz_enabled: boolean;
+  voz_quando: "nunca" | "espelhar" | "sempre";
   // Papel OPERADOR (spec 16 §3.2) — o que mexe no sistema depois da conversa.
   operator_enabled: boolean;
   /** "" = herda o modelo do Conversador (vira null no payload). */
@@ -310,6 +319,7 @@ export function buildState(args: {
     split_messages: version?.split_messages ?? false,
     split_max_chars: version?.split_max_chars ?? 600,
     inbound_debounce_ms: version?.inbound_debounce_ms ?? null,
+    reply_min_interval_ms: version?.reply_min_interval_ms ?? null,
     followup: version?.followup
       ? {
           ...DEFAULT_FOLLOWUP,
@@ -317,6 +327,8 @@ export function buildState(args: {
           callback_enabled: callbacksHabilitados(version.followup),
         }
       : DEFAULT_FOLLOWUP,
+    voz_enabled: version?.voz_enabled ?? false,
+    voz_quando: version?.voz_quando ?? "espelhar",
     operator_enabled: version?.operator_enabled ?? false,
     // O form usa "" onde o banco usa null — Select controlado não aceita null.
     // A conversão de volta acontece em `toVersionPayload`, num ponto só.
@@ -375,7 +387,10 @@ function toVersionPayload(s: FormState) {
     split_messages: s.split_messages,
     split_max_chars: s.split_max_chars,
     inbound_debounce_ms: s.inbound_debounce_ms,
+    reply_min_interval_ms: s.reply_min_interval_ms,
     followup: s.followup,
+    voz_enabled: s.voz_enabled,
+    voz_quando: s.voz_quando,
     operator_enabled: s.operator_enabled,
     // "" (não escolheu) → null (herda o do Conversador). São o mesmo conceito em
     // camadas diferentes, e o mapeamento vive AQUI para não se espalhar.
@@ -525,7 +540,7 @@ export function AgentForm(props: Props) {
    * chave que tinha acabado de escolher.
    */
   const publishBlockReason = React.useMemo(() => {
-    if (!isEdit) return t("Salve o agent antes de publicar.");
+    if (!isEdit) return t("Salve o agente antes de publicar.");
     const motivo = bloqueioDePublicacao({
       temRascunhoVigente: !!props.draft,
       formularioValido: isValid,
@@ -539,6 +554,9 @@ export function AgentForm(props: Props) {
         estadoDaCredencialDaOrg: credSt,
       },
       numero: { estado: channelSession?.status ?? null },
+      roteador: props.routerMembership
+        ? { estadoDoCanal: props.routerMembership.channelStatus }
+        : null,
     });
     if (!motivo) return null;
     switch (motivo.codigo) {
@@ -614,7 +632,7 @@ export function AgentForm(props: Props) {
           toast.error(res.message ?? `${t("Erro")}: ${res.error}`);
           return;
         }
-        toast.success(t("Agent criado."));
+        toast.success(t("Agente criado."));
         router.push(`/app/ai/agents/${res.data!.agent_id}`);
       }
     } finally {
@@ -969,7 +987,7 @@ export function AgentForm(props: Props) {
                   >
                     «{props.routerMembership.routerName}»
                   </Link>{" "}
-                  {t("— o campo de número abaixo não se aplica.")}
+                  {t("— a publicação usa o canal do roteador, sem número próprio neste especialista.")}
                 </p>
               </div>
             )}
@@ -1011,7 +1029,7 @@ export function AgentForm(props: Props) {
                 travava o botão de salvar — o dono de uma instalação nova escrevia
                 o prompt inteiro e não conseguia guardar nada.
               */}
-              {!form.channel_session_id ? (
+              {!form.channel_session_id && !props.routerMembership ? (
                 <p className="text-xs text-muted-foreground">
                   {props.channelSessions.length === 0 ? (
                     <>
@@ -1138,6 +1156,42 @@ export function AgentForm(props: Props) {
                   )}
                 </p>
               </div>
+              <div className="col-span-2 space-y-1">
+                <Label htmlFor="reply_min_interval_ms">
+                  {t("Pausa entre uma resposta e a próxima (segundos)")}
+                </Label>
+                <Input
+                  id="reply_min_interval_ms"
+                  type="number"
+                  min={0}
+                  max={600}
+                  step={1}
+                  placeholder={t("Vazio = sem pausa")}
+                  value={
+                    form.reply_min_interval_ms === null
+                      ? ""
+                      : String(Math.round(form.reply_min_interval_ms / 1000))
+                  }
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    // Vazio = sem pausa (campo null). A UI fala em SEGUNDOS; o
+                    // banco e o worker falam em ms (conversão aqui, num ponto só).
+                    // Teto de 600s no campo espelha o da validação e do worker.
+                    patch({
+                      reply_min_interval_ms:
+                        raw === ""
+                          ? null
+                          : Math.round(Math.max(0, Math.min(600, Number(raw))) * 1000),
+                    });
+                  }}
+                  disabled={disabled}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t(
+                    "Depois que a IA responde uma conversa, ela só responde de novo depois desse tempo. O que o cliente escrever nesse meio-tempo é respondido junto. Vazio ou 0 = sem pausa (máximo 600 segundos).",
+                  )}
+                </p>
+              </div>
             </div>
           </Card>
         </div>
@@ -1237,6 +1291,48 @@ export function AgentForm(props: Props) {
             ) : null}
           </Card>
 
+          {/* Voz (plano de voz, Fase 7) */}
+          <Card className="space-y-3 p-4">
+            <h3 className="text-sm font-medium">{t("Responder falando")}</h3>
+            <div className="flex items-center gap-2">
+              <Switch
+                id="voz_enabled"
+                checked={form.voz_enabled}
+                onCheckedChange={(v) => patch({ voz_enabled: v })}
+                disabled={disabled}
+              />
+              <Label htmlFor="voz_enabled">{t("Enviar nota de voz, não só texto")}</Label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t(
+                "Precisa de uma credencial do ElevenLabs cadastrada e de uma voz escolhida em Agente de IA → Provedores. Sem os dois, o agente continua respondendo em texto — ligar aqui não quebra nada.",
+              )}
+            </p>
+            {form.voz_enabled ? (
+              <div className="space-y-1">
+                <Label htmlFor="voz_quando">{t("Quando falar")}</Label>
+                <Select
+                  value={form.voz_quando}
+                  onValueChange={(v) => patch({ voz_quando: v as FormState["voz_quando"] })}
+                  disabled={disabled}
+                >
+                  <SelectTrigger id="voz_quando">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="espelhar">
+                      {t("Só quando o cliente mandar áudio")}
+                    </SelectItem>
+                    <SelectItem value="sempre">{t("Sempre")}</SelectItem>
+                    <SelectItem value="nunca">
+                      {t("Nunca (desligado, sem apagar a configuração)")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
+          </Card>
+
           {/* Capacidades */}
           <Card className="space-y-2 p-4">
             <h3 className="text-sm font-medium">{t("O que o agente pode fazer")}</h3>
@@ -1271,6 +1367,7 @@ export function AgentForm(props: Props) {
               onChange={(v) => patch({ trigger_config: v })}
               disabled={disabled}
               organizationTimezone={props.organizationTimezone}
+              funis={props.funis}
             />
           </Card>
 
@@ -1444,11 +1541,31 @@ export function AgentForm(props: Props) {
           )}
 
           {/* Servidor MCP externo no atendimento (#2147). Só admin vê e
-              grava; salva em `ai_agents.config.mcp_externo_no_atendimento`. */}
+              grava; salva em `ai_agents.config.mcp_externo_no_atendimento`.
+              A ESCOLHA das ferramentas do servidor (#3586) vai para o
+              `tool_ids` da versão, pelo mesmo salvar do resto do formulário —
+              por isso o cartão recebe o valor e o setter do formulário, como o
+              `ToolPicker` acima. */}
           {isEdit && !readOnly && (
             <ServidorExternoNoAtendimento
               agentId={props.agent.id}
               inicial={(props.agent.config ?? {}).mcp_externo_no_atendimento}
+              toolIds={form.tool_ids}
+              onChangeToolIds={(ids) => patch({ tool_ids: ids })}
+              disabled={disabled}
+            />
+          )}
+
+          {/* Servidores MCP DO AGENTE (migration 9095): N servidores, cada um
+              com o seu modo de autenticação — inclusive OAuth em que cada
+              cliente autoriza a própria conta. A escolha das ferramentas vai
+              para o `tool_ids` da versão, pelo mesmo salvar do formulário.
+              Módulo opcional desligado de fábrica (doc 252). */}
+          {isEdit && !readOnly && props.mcpPorAgente === true && (
+            <ServidoresMcpDoAgente
+              agentId={props.agent.id}
+              toolIds={form.tool_ids}
+              onChangeToolIds={(ids) => patch({ tool_ids: ids })}
               disabled={disabled}
             />
           )}

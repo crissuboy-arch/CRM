@@ -229,6 +229,21 @@ const schema = z.object({
   // devolve 401 em toda chamada — por isso `getWacallsClient()` exige os dois.
   WACALLS_API_TOKEN: z.string().optional().default(""),
 
+  // ─── Prospecção: engine de scraping self-hosted (local-http, #2942) ───────
+  //
+  // Mesmo desenho de WACALLS_API_BASE_URL: NUNCA `required()`. Vazio = a
+  // instalação não oferece o engine de scraping self-hosted, e a organização
+  // que escolher `local-http` em `settings.prospecting.provider` cai no erro
+  // FECHADO de sempre ("Informe a URL do engine de busca local.").
+  //
+  // A URL é da INSTALAÇÃO — e não da organização, como a #2942 propôs: é isso
+  // que faz a liberação de destino interno valer (`lib/automation/
+  // destinos-internos-autorizados.ts`, regra 2 — endereço escolhido por uma
+  // organização nunca alcança a rede de dentro). Quem lê é
+  // `baseDoEngineDaInstalacao()` em `lib/prospecting/provedor-local-http.ts`,
+  // que ainda passa o endereço pela régua de saída antes de chamar o engine.
+  PROSPECTING_LOCAL_HTTP_URL: z.string().optional().default(""),
+
   // ─── Videochamada (Jitsi Meet, #2440) — OPCIONAL, DESLIGADA POR PADRÃO ───
   //
   // Mesmo desenho de WACALLS_API_BASE_URL: NUNCA `required()`. Vazio = a
@@ -274,6 +289,15 @@ const schema = z.object({
   // canal: sem aba em Conexões, rota de conexão 404, webhook recusado. Quem lê
   // é `canalGraphParceiroLigado()` em `lib/channels/graph-parceiro/credentials.ts`.
   DATAFY_ENABLED: z.string().optional().default(""),
+
+  // ─── Número oficial com um clique (migration 9093) — OPCIONAL ───
+  //
+  // Chave da conta do provedor parceiro DA INSTALAÇÃO. Vazia = a tela de
+  // Conexões oferece só a conexão por chave própria, como antes. É semente: a
+  // tela Painel › Configuração vence este valor. Quem lê é `chaveDaInstalacao()`
+  // em `lib/channels/zernio/credentials.ts`, pelo resolvedor da instalação, a
+  // cada chamada — nunca por `env.`, para a troca na tela valer na hora.
+  ZERNIO_PLATFORM_API_KEY: z.string().optional().default(""),
 
   // Upstash Redis
   UPSTASH_REDIS_REST_URL: required("UPSTASH_REDIS_REST_URL"),
@@ -667,7 +691,9 @@ const schema = z.object({
 
   /**
    * Par VAPID do Web Push. Opcionais: sem elas a bandeja só funciona com a aba
-   * viva (Notification API + SW local). Gerar: `npx web-push generate-vapid-keys`.
+   * viva (Notification API + SW local). O kit gera o par sozinho no install e na
+   * atualização; fora dele, `npx web-push generate-vapid-keys`. Nunca troque um par
+   * existente: trocar desliga os avisos de todo aparelho já inscrito.
    */
   VAPID_PUBLIC_KEY: z.string().optional().default(""),
   VAPID_PRIVATE_KEY: z.string().optional().default(""),
