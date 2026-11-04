@@ -40,9 +40,13 @@ describe("manifest do ícone configurável", () => {
     expect(antes.scope).toBe(depois.scope);
     expect(antes.id).toBe(depois.id);
   });
-  it("a descrição segue o idioma do aparelho que pede (não há idioma da instalação)", async () => {
-    expect((await manifest()).description).toBe("Atendimento e vendas pelo WhatsApp, também no celular.");
+  // NEXORA (fork): a descrição do manifest é APP_DESCRIPTION ("AI-Powered CRM"),
+  // herdada do NEXORA pré-merge — NÃO a descrição traduzida do upstream, que o
+  // merge recusou para preservar a identidade NEXORA (ver app/manifest.ts).
+  // Por isso ela é estável entre idiomas, ao contrário do teste upstream.
+  it("a descrição é a do NEXORA, estável entre idiomas", async () => {
+    expect((await manifest()).description).toBe("AI-Powered CRM");
     mocks.lingua.valor = "es-AR,es;q=0.9";
-    expect((await manifest()).description).toBe("Atención y ventas por WhatsApp, también en el celular.");
+    expect((await manifest()).description).toBe("AI-Powered CRM");
   });
 });
