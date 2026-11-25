@@ -2,7 +2,8 @@ import Link from "next/link";
 
 import { EntrarComGoogle } from "@/components/auth/EntrarComGoogle";
 import { LoginForm } from "@/components/auth/LoginForm";
-import { APP_DESCRIPTION, branding } from "@/lib/branding";
+import { APP_DESCRIPTION } from "@/lib/branding";
+import { marcaDaSaida } from "@/lib/branding/saida";
 import { verifyInviteToken } from "@/lib/auth/invite-token";
 import { createClient } from "@/lib/supabase/server";
 import { idiomaDoVisitante } from "@/lib/i18n/idiomaAnonimo";
@@ -32,12 +33,15 @@ export default async function LoginPage({
     (user?.user_metadata?.locale as string | undefined) ?? null,
   );
   const t = (texto: string) => traduzir(texto, idioma);
+  // O nome vem do banco (marca da instalação) acima do .env, e nunca lança —
+  // `branding()` só lê o .env, e a marca gravada pela tela não chegaria aqui.
+  const marca = await marcaDaSaida(null);
 
   return (
     <div className="space-y-6">
       <div className="space-y-1.5 text-center">
         <h1 className="text-2xl font-semibold tracking-tight">{t("Entrar")}</h1>
-        <p className="text-sm text-muted-foreground">{branding().name}</p>
+        <p className="text-sm text-muted-foreground">{marca.nome}</p>
         <p className="text-xs text-muted-foreground">{APP_DESCRIPTION}</p>
       </div>
       {reset === "success" && (
