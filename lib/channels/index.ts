@@ -4,6 +4,8 @@
  */
 import { datafyAdapter } from "./adapters/datafy";
 import { metaCloudAdapter } from "./adapters/meta-cloud";
+import { telegramAdapter } from "./adapters/telegram";
+import { webchatAdapter } from "./adapters/webchat";
 import { wahaAdapter } from "./adapters/waha";
 import { socialAdapter } from "./social/adapter";
 import { zernioAdapter } from "./adapters/zernio";
@@ -19,6 +21,8 @@ const ADAPTERS: Record<ProviderDeMensagem, ChannelAdapter | null> = {
   zernio: zernioAdapter,
   zernio_social: socialAdapter,
   datafy: datafyAdapter,
+  telegram: telegramAdapter,
+  webchat: webchatAdapter,
 };
 
 /**
@@ -29,6 +33,18 @@ export function getAdapter(provider: ChannelProvider): ChannelAdapter {
   const adapter = ADAPTERS[provider as ProviderDeMensagem];
   if (!adapter) throw new Error(`unknown_channel_provider: ${provider}`);
   return adapter;
+}
+
+/**
+ * Os providers cujo adapter sabe perguntar se um número TEM conta
+ * (`numeroTemConta`). Derivado dos adapters, não de uma lista à mão: quem
+ * implementar o método entra sozinho. É o que o SQL usa para escolher uma
+ * conexão capaz de perguntar, sem nomear provider fora deste diretório.
+ */
+export function provedoresQueConferemNumero(): ProviderDeMensagem[] {
+  return (Object.keys(ADAPTERS) as ProviderDeMensagem[]).filter(
+    (p) => typeof ADAPTERS[p]?.numeroTemConta === "function",
+  );
 }
 
 export {
@@ -46,6 +62,7 @@ export type {
   ChannelAdapter,
   ChannelCapabilities,
   ChannelProvider,
+  ContatoDoAparelho,
   ProviderDeMensagem,
   OutboundEnvelope,
   OutboundKind,

@@ -26,7 +26,12 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
 
-import { DEEPSEEK_ENDPOINT, REQUESTY_ENDPOINT } from "@/lib/agent-engine/edge/llm/providers";
+import {
+  AIMLAPI_ENDPOINT,
+  DEEPSEEK_ENDPOINT,
+  fetchDoProvedor,
+  REQUESTY_ENDPOINT,
+} from "@/lib/agent-engine/edge/llm/providers";
 import { fetchParaDestinoDaOrganizacao } from "@/lib/automation/destinos-internos-autorizados";
 import { decryptKey, byteaToBuffer } from "@/lib/crypto/aes_gcm";
 import { logger } from "@/lib/logger";
@@ -41,7 +46,30 @@ export interface ModeloResolvido {
   /** Para o log: qual modelo e de onde veio a decisão. */
   modelId: string;
   origem: "binding" | "credencial_da_organizacao" | "padrao";
+  /**
+   * O provedor do binding ou da credencial da organização; vazio quando quem
+   * atende é a chave da instalação (origem `padrao`). Nesse caso quem escolhe o
+   * endereço é o ambiente (`resolveLanguageModel`: gateway, OpenRouter, ou o
+   * fornecedor direto pelo prefixo), não o provedor configurado na organização,
+   * e o vazio devolve a decisão ao palpite de `provedorDaChamada`.
+   *
+   * Existe para quem chama pelo gateway ENTREGAR este valor ao log de invocação
+   * (issue #3098). Antes, quem logava só tinha o id do modelo, e o palpite por
+   * barra de `providerDoModelo` carimbava `openrouter` numa chamada ao provedor
+   * personalizado da empresa (`qwen/qwen3.8-27b` no Groq) — a divisão de custo
+   * por provedor ficava errada e a instalação parecia usar um provedor que ela
+   * tinha decidido não usar. É o MESMO valor que vai para o log estruturado da
+   * resolução (`logarResolucaoDeModelo`) nas origens `binding` e
+   * `credencial_da_organizacao`.
+   */
+  provider: string;
 }
+
+/**
+ * O que os degraus internos montam antes de o provedor ser anexado: só
+ * `devolver` sabe o provedor do endereço, e é dele que o par sai completo.
+ */
+type ResolucaoSemProvedor = Omit<ModeloResolvido, "provider">;
 
 /**
  * Resolve o modelo de um ponto, honrando o painel quando há binding.
@@ -89,7 +117,7 @@ export async function resolverModeloDoPonto(
   const providerEfetivo = binding !== null ? binding.provider : daOrg?.provider ?? null;
 
   const devolver = (
-    resolvido: ModeloResolvido | null,
+    resolvido: ResolucaoSemProvedor | null,
     provider: string,
     model: string,
     origem: string,
@@ -106,7 +134,21 @@ export async function resolverModeloDoPonto(
       origem,
       motivo,
     });
-    return resolvido;
+    // O provedor EFETIVO entra aqui, e não em cada degrau (#3098): é o MESMO
+    // valor que acabou de ir para o log da resolução, que é o que o worker
+    // confirma ao operador ("provider: custom, origem_da_configuracao: binding").
+    // Quem chama pelo gateway entrega este campo ao log de invocação, e é ele
+    // que impede `llm_calls` de carimbar `openrouter` numa chamada ao provedor
+    // personalizado cujo id de modelo tem barra.
+    //
+    // Só nas origens em que o provedor É o executor. Com origem `padrao` quem
+    // atende é a chave do `.env`, e o provedor configurado na organização não
+    // decide o destino: uma org em `openrouter` sem credencial, numa instalação
+    // só com `ANTHROPIC_API_KEY`, faz chamada Anthropic direta, e gravar
+    // `openrouter` ali seria o mesmo sintoma da #3098 por outro caminho.
+    return resolvido === null
+      ? null
+      : { ...resolvido, provider: resolvido.origem === "padrao" ? "" : provider };
   };
 
   // ── O DEFAULT DO PRODUTO NÃO CRUZA PROVEDOR ─────────────────────────────
@@ -360,7 +402,7 @@ async function lerBinding(
  * de modelo: quem já está dentro do provedor recebe só o nome, e é o que
  * `resolveLanguageModel` faz ao rotear pelo prefixo. A OpenRouter é a exceção
  * porque é agregadora — lá o prefixo é parte do endereço e vai inteiro.
- * A Requesty também é agregadora, e segue a mesma regra.
+ * A Requesty e a AI/ML API também são agregadoras, e seguem a mesma regra.
  *
  * O `null` é o freio do PR #151: id de outro provedor não vira chamada com a
  * chave da organização, vira queda para `resolveLanguageModel`, que sabe achar
@@ -369,7 +411,12 @@ async function lerBinding(
 function idParaOProvider(provider: string, id: string): string | null {
   // Os roteadores levam o prefixo inteiro — inclusive o provedor personalizado
   // (#1642), que serve id de QUALQUER fabricante atrás do próprio endpoint.
-  if (provider === "openrouter" || provider === "requesty" || provider === "custom")
+  if (
+    provider === "openrouter" ||
+    provider === "requesty" ||
+    provider === "aimlapi" ||
+    provider === "custom"
+  )
     return id;
   if (!id.includes("/")) return id;
   if (id.startsWith(`${provider}/`)) return id.slice(provider.length + 1);
@@ -547,13 +594,14 @@ async function padraoDaOrganizacao(
   organizationId: string,
   daOrg: { provider: string; apiKey: string | null } | null,
   purpose: string,
-): Promise<ModeloResolvido | null> {
+): Promise<ResolucaoSemProvedor | null> {
   const llm = await llmDaOrganizacao(organizationId);
   if (llm === null || llm.defaultModel === null) return null;
   const defaultModel = await modeloDoProvedor(organizationId, llm.provider, llm.defaultModel);
   const modelId =
     llm.provider === "openrouter" ||
     llm.provider === "requesty" ||
+    llm.provider === "aimlapi" ||
     llm.provider === "custom" ||
     defaultModel.startsWith(`${llm.provider}/`)
       ? defaultModel
@@ -829,13 +877,26 @@ function instanciar(
       return createOpenAI({ apiKey, baseURL: baseUrl ?? DEEPSEEK_ENDPOINT })(modelId);
     case "requesty":
       return createOpenAI({ apiKey, baseURL: baseUrl ?? REQUESTY_ENDPOINT }).chat(modelId); // ver providers.ts
+    // AI/ML API: endpoint fixo (sem `baseUrl`), e a chave só sai para
+    // `api.aimlapi.com`, inclusive em redirect. Ver providers.ts.
+    case "aimlapi":
+      return createOpenAI({
+        apiKey,
+        baseURL: AIMLAPI_ENDPOINT,
+        fetch: fetchDoProvedor(AIMLAPI_ENDPOINT),
+      }).chat(modelId);
     // Provedor personalizado (#1642): endpoint do operador. Sem `baseUrl` não
     // há onde ir — `null` deixa o chamador cair no padrão COM AVISO, que é o
     // contrato deste switch; inventar um endpoint seria mandar a chave do
     // gateway para outro lugar.
     case "custom":
       return baseUrl
-        ? createOpenAI({ apiKey, baseURL: baseUrl, fetch: fetchParaDestinoDaOrganizacao() }).chat(modelId)
+        ? createOpenAI({
+            apiKey,
+            baseURL: baseUrl,
+            fetch: fetchParaDestinoDaOrganizacao(),
+            headers: { Accept: "application/json" }, // ver o provedor `custom` de providers.ts
+          }).chat(modelId)
         : null;
     default:
       return null;
