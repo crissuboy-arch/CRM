@@ -141,6 +141,7 @@ acessibilidade).
 | [`SETUP.md`](SETUP.md) | Guia completo de env vars e setup local |
 | [`deploy-selfhost/README.md`](deploy-selfhost/README.md) | Self-host genérico |
 | [`deploy-hostgator/README.md`](deploy-hostgator/README.md) | VPS HostGator (`install.sh`, `backup.sh`, `reset-mfa.sh`) |
+| [`sync-deskcomm-2026-11-25.md`](sync-deskcomm-2026-11-25.md) | Sync com o upstream DeskcommCRM de 25/11/2026 — o que entrou, validação, CI vermelho por falta de memória, correção do heap por enviar, e o que isto muda na instalação na VPS |
 | [`DEPLOY-CHECKLIST.md`](DEPLOY-CHECKLIST.md) | Checklist de deploy |
 | [`ATUALIZANDO.md`](ATUALIZANDO.md) | `update.sh`, `restore.sh`, `healthcheck.sh` |
 | [`runbooks/deploy.md`](runbooks/deploy.md) | **Deploy em produção — os dois `-f` do compose, verificação pós-deploy** |
