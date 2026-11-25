@@ -67,6 +67,10 @@ Para criar só o projeto, sem instalar, o script também roda sozinho:
 bash supabase-provision.sh "Nome do Projeto" sa-east-1 >> .env
 ```
 
+O segundo argumento (ou `SUPABASE_REGION`) é a região do projeto: use a **mais próxima da VPS** —
+`sa-east-1` no Brasil, `us-east-1` ou `eu-central-1` nos EUA/Europa. Ela **não muda depois** de
+criado o projeto.
+
 O script cria o projeto, **espera o banco ficar `ACTIVE_HEALTHY`** (projeto novo não
 nasce pronto), busca as chaves e **descobre o host do pooler testando conexão real** em
 vez de adivinhar. Imprime as 4 linhas prontas para colar no `.env`.
@@ -122,8 +126,8 @@ Owner/Admin. Não dá para hospedar vários clientes numa conta só.
 
 Algumas hospedagens entregam a VPS com um **Traefik** já ocupando as portas 80/443 — é ele
 que dá HTTPS automático ao que o painel instala. O Caddy do kit quer as mesmas portas e não
-sobe. O instalador **detecta isso sozinho** e grava `REVERSE_PROXY=traefik` no `.env`; a
-partir daí os scripts do kit incluem o override que desliga o Caddy e publica o app pelo
+sobe. O `install.sh` (banco no Supabase Cloud) **detecta isso sozinho** e grava
+`REVERSE_PROXY=traefik` no `.env`; a partir daí os scripts do kit incluem o override que desliga o Caddy e publica o app pelo
 Traefik da hospedagem. Rodando compose na mão nessas instalações, use os dois arquivos:
 
 ```bash
@@ -142,7 +146,21 @@ proxy errado deixa o site no ar sem responder, o instalador mostra o que encontr
 confirmação. Em `bash install.sh --yes` não há a quem perguntar: ele para e pede que você
 declare `REVERSE_PROXY=traefik` no `.env` — aí a escolha é sua e ele segue sem perguntar.
 
-Atrás do proxy do Coolify (ou outro Traefik em rede Docker própria): veja [docs/saas/coolify.md](../docs/saas/coolify.md) — a porta do banco (API_GW_HTTP_PORT) e a rede do proxy (TRAEFIK_NETWORK) vão no comando.
+**No single-server (`install-single-server.sh`, banco na mesma VPS) a detecção não roda.**
+Ele grava `REVERSE_PROXY=caddy` no `.env` a menos que a variável venha no ambiente, e então
+chama o `install.sh --yes` com a escolha já feita. Sem declarar nada, o Caddy do kit sobe e
+briga pelas portas 80/443 com o Traefik da hospedagem. Declare no próprio comando, antes de
+rodar — escrever só no `.env` não basta, porque o single-server o regrava:
+
+- `REVERSE_PROXY=traefik`: quem publica o site é o Traefik da hospedagem;
+- `TRAEFIK_NETWORK=<rede do proxy>`: com Traefik em rede Docker própria (Coolify, Dokploy),
+  é a rede onde ele alcança as APIs do banco. Confira o nome com `docker network ls`. Com
+  Traefik em `--network host` (Hostinger), deixe de fora.
+
+O exemplo completo, com a porta do banco (`API_GW_HTTP_PORT`) e os nomes das portas do proxy,
+está em [docs/saas/coolify.md](../docs/saas/coolify.md#passo-5--instalar-o-crm-e-o-banco).
+O single-server recusa `REVERSE_PROXY=cloudflared`: as APIs do Supabase dependem do Caddy, e
+o Cloudflare Tunnel só serve com o banco no Supabase Cloud.
 
 ## Scripts do kit
 
@@ -150,7 +168,7 @@ Atrás do proxy do Coolify (ou outro Traefik em rede Docker própria): veja [doc
 |---|---|
 | `install.sh` | Instala tudo (idempotente) |
 | `update.sh` | Atualiza pra versão nova |
-| `backup.sh` | Backup do banco + sessões WhatsApp |
+| `backup.sh` | Backup do banco + sessões WhatsApp (`--podar` aplica só a retenção) |
 | `restore.sh` | Restaura um backup |
 | `reset-password.sh` | Redefine senha de um usuário |
 | `reset-mfa.sh` | Remove o MFA de um usuário travado |
@@ -162,12 +180,53 @@ imagens do CRM ou a WAHA efetiva não tenham variante nativa. No single-server,
 também sondam as imagens fixadas do Supabase. O pré-voo não prova chamada de voz,
 entrega WhatsApp ou restauração de dados: essas jornadas exigem teste real.
 
+## Espaço em disco, retenção e imagens antigas
+
+O `update.sh` **confere o espaço livre antes de qualquer escrita** e recusa a atualização
+quando a conta não fecha — nada é parado, nada é baixado, a versão atual segue no ar, e o
+`agent.sh` lê o código de saída como "esta atualização nunca começou". O mínimo é o maior
+entre:
+
+- `DESKCOMM_ESPACO_MINIMO_MB` (piso, padrão **1024** — só decide quando não há como medir as imagens);
+- o tamanho das imagens em uso **mais** o do último backup, com 20% de folga.
+
+A mensagem da recusa traz os dois números e o que libera espaço sem apagar dado. Três
+ajustes no `.env` mudam o comportamento:
+
+| Variável | Padrão | Para quê |
+|---|---|---|
+| `DESKCOMM_ESPACO_MINIMO_MB` | `1024` | piso, em MB, quando o tamanho das imagens não pode ser medido |
+| `BACKUP_KEEP` | `14` | quantos backups **por tipo** (db, waha, storage) a retenção guarda |
+| `DESKCOMM_PODA_IMAGENS` | `1` | `0` desliga a poda ao fim da atualização |
+
+Depois de uma atualização **saudável**, o `update.sh` roda uma poda conservadora:
+`docker image prune -f` com `--filter dangling=true --filter until=168h` (só camadas sem
+tag com mais de 7 dias) e, uma a uma, as versões antigas das imagens **deste** produto —
+nunca a versão atual, nunca a da volta (`.deskcomm-env-antes-do-update`), nunca uma imagem
+que um contêiner usa, nunca canal móvel (`stable`) e nunca imagem de terceiros. Falha da
+poda é aviso: a atualização já está concluída.
+
+O que continua sendo do **operador**, e o kit não faz por conta própria:
+
+- `docker image prune -a` (leva embora a imagem da versão anterior, que é a volta) e
+  `docker system prune --volumes` (apaga o volume com a sessão do WhatsApp e o banco);
+- escolher retenção por **tamanho** e mandar cópia para fora da VPS (S3 ou outra máquina);
+- aumentar o disco. O passo a passo está em
+  [docs/runbooks/remediar-worker-congelado.md](../docs/runbooks/remediar-worker-congelado.md).
+
 > ⚠️ **Restaurar um backup: o `restore.sh` só restaura num banco VAZIO.** O dump do
 > `backup.sh` sai com `--no-owner --no-privileges` e **sem `--clean`**: ele não tem `DROP` nem
 > `TRUNCATE`, e os `CREATE TABLE` não têm `IF NOT EXISTS`. Antes de pedir a confirmação, o
 > `restore.sh` conta as tabelas de `public` e, se o banco já tem as tabelas do sistema, **para
 > com mensagem própria** — nada é alterado e o `psql` nem é chamado. Ou seja: hoje ele **não**
 > volta o backup por cima da instalação que está em uso (isso está em aberto na issue #2120).
+>
+> Antes de restaurar, o kit verifica a integridade do `.sql.gz` e dos snapshots `.tgz`
+> presentes que usará (WhatsApp e, no single-server, Storage). Se algum estiver corrompido
+> ou cortado, para antes de alterar banco ou volumes. Essa conferência não garante que a
+> escrita vá funcionar: se a extração falhar depois, o comando sai com erro e informa que
+> o banco já foi restaurado. Confira o destino antes de reiniciar; repetir o script não
+> restaura por cima do banco populado. Snapshots ausentes continuam opcionais.
 >
 > O caminho que funciona hoje é restaurar num **projeto Supabase novo, em que o instalador
 > ainda não rodou** (o instalador cria as tabelas, e aí o restore recusa), e depois apontar a

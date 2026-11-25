@@ -47,6 +47,23 @@ export const CAMADAS_SEMANTICAS = ['promessa_semantica', 'jailbreak', 'afirmacao
 
 export type CamadaSemantica = (typeof CAMADAS_SEMANTICAS)[number];
 
+/**
+ * A quarta escolha: valores e negociação só com a equipe (#2877). Não custa nada,
+ * não tem variável de ambiente e nasce desligada.
+ *
+ * Fica FORA de `CAMADAS_SEMANTICAS` de propósito: aquela lista alimenta
+ * `lerCamadasDaOrg`, que falha ABERTA, e esta camada falha FECHADA — a leitura
+ * dela mora em `comercialExigeHumano` (`lib/escalacao/assunto-comercial.ts`), que
+ * lança em vez de liberar. A coluna `layer` é de vocabulário aberto, então não há
+ * migration: a linha nasce quando alguém liga o interruptor.
+ */
+export const CAMADA_RESTRICAO_COMERCIAL = 'restricao_comercial' as const;
+
+/** Tudo que a tela de Segurança deixa ligar ou desligar — o que a rota aceita. */
+export const CAMADAS_CONFIGURAVEIS = [...CAMADAS_SEMANTICAS, CAMADA_RESTRICAO_COMERCIAL] as const;
+
+export type CamadaConfiguravel = (typeof CAMADAS_CONFIGURAVEIS)[number];
+
 /** O que a organização escolheu. `null` = não escolheu; vale o ambiente. */
 export type EscolhaDeCamadas = Record<CamadaSemantica, boolean | null>;
 
@@ -127,11 +144,43 @@ export function escolhaDasLinhas(rows: ReadonlyArray<{ layer: string; enabled: b
  */
 export function padraoDasCamadasNoAmbiente(
   env: Readonly<Record<string, string | undefined>> = process.env,
-): Record<CamadaSemantica, boolean> {
+): Record<CamadaConfiguravel, boolean> {
   return {
     promessa_semantica: env.PROMISE_SEMANTIC_ENABLED === 'true',
     jailbreak: true,
     afirmacao_clinica: false,
+    // Sem variável de ambiente: proibir a IA de falar de preço é decisão do negócio.
+    restricao_comercial: false,
+  };
+}
+
+/**
+ * O estado EFETIVO das QUATRO camadas configuráveis, para a tela que precisa
+ * dizer o que o motor faz hoje (#1041).
+ *
+ * `camadasEfetivas` abaixo responde só pelas três de `CAMADAS_SEMANTICAS`:
+ * `restricao_comercial` fica de fora porque falha FECHADA e é lida por
+ * `comercialExigeHumano` (`lib/escalacao/assunto-comercial.ts`), não por aqui.
+ * A coluna "o que ele nunca faz" do onboarding promete as quatro, então precisa
+ * das quatro — com a MESMA precedência (`camadaLigada`): linha da organização
+ * quando existe, padrão do ambiente quando não existe.
+ *
+ * ⚠️ Isto LÊ; não muda padrão de camada nenhuma. A tela que passa a dizer
+ * "desligada" é a consequência, não a causa: `afirmacao_clinica` e
+ * `restricao_comercial` nascem desligadas, e `promessa_semantica` só liga com
+ * `PROMISE_SEMANTIC_ENABLED=true` — ligar qualquer uma por padrão para a
+ * promessa da tela ficar bonita seria comportamento novo sem pedido.
+ */
+export function estadoEfetivoDasCamadas(
+  rows: ReadonlyArray<{ layer: string; enabled: boolean }>,
+  padrao: Record<CamadaConfiguravel, boolean> = padraoDasCamadasNoAmbiente(),
+): Record<CamadaConfiguravel, boolean> {
+  const porCamada = new Map(rows.map((r) => [r.layer, r.enabled]));
+  return {
+    promessa_semantica: camadaLigada(porCamada.get("promessa_semantica") ?? null, padrao.promessa_semantica),
+    jailbreak: camadaLigada(porCamada.get("jailbreak") ?? null, padrao.jailbreak),
+    afirmacao_clinica: camadaLigada(porCamada.get("afirmacao_clinica") ?? null, padrao.afirmacao_clinica),
+    restricao_comercial: camadaLigada(porCamada.get("restricao_comercial") ?? null, padrao.restricao_comercial),
   };
 }
 
